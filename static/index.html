@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Portfolio Tracker</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Portfolio Tracker</h1>
+        <p id="asOfLine">Local holdings snapshots</p>
+      </div>
+      <form id="uploadForm" class="upload-form">
+        <label class="file-picker">
+          <input id="fileInput" name="file" type="file" accept=".csv,text/csv">
+          <span id="fileLabel">Choose CSV</span>
+        </label>
+        <input id="accountName" name="account_name" type="text" list="accountOptions" placeholder="Account override">
+        <datalist id="accountOptions"></datalist>
+        <input id="cashBalance" name="cash_balance" type="number" step="0.01" min="0" placeholder="Cash balance">
+        <select id="cashCurrency" name="cash_currency" aria-label="Cash currency">
+          <option value="CAD">CAD</option>
+          <option value="USD">USD</option>
+        </select>
+        <button type="submit">Import</button>
+      </form>
+    </header>
+
+    <main>
+      <section class="app-panel">
+        <div id="portfolioTabs" class="tabs" role="tablist" aria-label="Portfolio pages"></div>
+
+        <div id="message" class="message" hidden></div>
+
+        <section id="summaryView" class="view active">
+          <section class="metrics" aria-label="Portfolio totals">
+            <article class="metric">
+              <span>Total Value</span>
+              <strong id="totalValue">$0.00</strong>
+            </article>
+            <article class="metric">
+              <span>Book Value</span>
+              <strong id="bookValue">$0.00</strong>
+            </article>
+            <article class="metric">
+              <span>Unrealized Gain</span>
+              <strong id="gainLoss">$0.00</strong>
+            </article>
+            <article class="metric">
+              <span>Return</span>
+              <strong id="gainLossPct">0.00%</strong>
+            </article>
+          </section>
+
+          <section class="summary-grid">
+            <section class="section-panel">
+              <div class="panel-heading">
+                <h2>Accounts</h2>
+              </div>
+              <div id="accountList" class="account-list"></div>
+            </section>
+
+            <section class="section-panel">
+              <div class="panel-heading">
+                <h2>Currencies</h2>
+              </div>
+              <div id="currencyList" class="currency-list"></div>
+            </section>
+          </section>
+
+          <section class="section-panel">
+            <div class="panel-heading">
+              <h2>Combined Allocation</h2>
+            </div>
+            <div id="summaryAllocationBar" class="allocation-bar"></div>
+            <div id="summaryAllocationList" class="allocation-list"></div>
+          </section>
+
+          <section class="section-panel">
+            <div class="table-toolbar">
+              <input id="summarySearchInput" type="search" placeholder="Filter combined holdings">
+              <span id="summaryHoldingCount">0 holdings</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort="symbol">Symbol</th>
+                    <th data-sort="description">Description</th>
+                    <th data-sort="quantity" class="numeric">Quantity</th>
+                    <th data-sort="closing_price" class="numeric">Price</th>
+                    <th data-sort="closing_value" class="numeric">Value</th>
+                    <th data-sort="book_value" class="numeric">Book</th>
+                    <th data-sort="gain_loss" class="numeric">Gain</th>
+                    <th data-sort="combined_portfolio_pct" class="numeric">Weight</th>
+                  </tr>
+                </thead>
+                <tbody id="summaryHoldingsBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="accountView" class="view">
+          <div id="accountHeader" class="account-header"></div>
+          <section id="accountMetrics" class="metrics" aria-label="Account totals"></section>
+
+          <section class="section-panel">
+            <div class="panel-heading">
+              <h2>Account Allocation</h2>
+            </div>
+            <div id="accountAllocationBar" class="allocation-bar"></div>
+            <div id="accountAllocationList" class="allocation-list"></div>
+          </section>
+
+          <section class="section-panel">
+            <div class="table-toolbar">
+              <input id="accountSearchInput" type="search" placeholder="Filter account holdings">
+              <span id="accountHoldingCount">0 holdings</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort="symbol">Symbol</th>
+                    <th data-sort="description">Description</th>
+                    <th data-sort="quantity" class="numeric">Quantity</th>
+                    <th data-sort="closing_price" class="numeric">Price</th>
+                    <th data-sort="closing_value" class="numeric">Value</th>
+                    <th data-sort="book_value" class="numeric">Book</th>
+                    <th data-sort="gain_loss" class="numeric">Gain</th>
+                    <th data-sort="account_weight" class="numeric">Acct Weight</th>
+                  </tr>
+                </thead>
+                <tbody id="accountHoldingsBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="accountsSetupView" class="view">
+          <section class="setup-layout">
+            <form id="accountSetupForm" class="section-panel account-setup-form">
+              <div class="panel-heading">
+                <h2>New Account</h2>
+              </div>
+              <label>
+                <span>Account name</span>
+                <input id="setupAccountName" name="name" type="text" autocomplete="off" required>
+              </label>
+              <label>
+                <span>Owner</span>
+                <input id="setupOwner" name="owner" type="text" autocomplete="off">
+              </label>
+              <label>
+                <span>Account type</span>
+                <select id="setupAccountType" name="account_type">
+                  <option value="RRSP">RRSP</option>
+                  <option value="RESP">RESP</option>
+                  <option value="TFSA">TFSA</option>
+                  <option value="Taxable">Taxable</option>
+                  <option value="Cash">Cash</option>
+                  <option value="Investment">Investment</option>
+                </select>
+              </label>
+              <label>
+                <span>Base currency</span>
+                <select id="setupBaseCurrency" name="base_currency">
+                  <option value="CAD">CAD</option>
+                  <option value="USD">USD</option>
+                </select>
+              </label>
+              <label>
+                <span>Notes</span>
+                <textarea id="setupNotes" name="notes" rows="4"></textarea>
+              </label>
+              <button type="submit">Save Account</button>
+            </form>
+
+            <section class="section-panel">
+              <div class="panel-heading">
+                <h2>Accounts</h2>
+              </div>
+              <div id="setupAccountList" class="setup-account-list"></div>
+            </section>
+          </section>
+        </section>
+
+        <section id="importsView" class="view">
+          <section class="section-panel">
+            <div class="panel-heading">
+              <h2>Import History</h2>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Imported</th>
+                    <th>Account</th>
+                    <th>Report Date</th>
+                    <th class="numeric">Rows</th>
+                    <th class="numeric">Value</th>
+                    <th>Raw File</th>
+                  </tr>
+                </thead>
+                <tbody id="importsBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

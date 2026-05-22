@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.venv/
+data/
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr

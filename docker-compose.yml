@@ -1,0 +1,22 @@
+services:
+  portfolio-tracker:
+    build:
+      context: .
+    image: local-portfolio-tracker:latest
+    container_name: portfolio-tracker
+    ports:
+      - "8000:8000"
+    environment:
+      PORTFOLIO_USERNAME: ${PORTFOLIO_USERNAME:-admin}
+      PORTFOLIO_PASSWORD: ${PORTFOLIO_PASSWORD:-changeme}
+      PORTFOLIO_SECRET_KEY: ${PORTFOLIO_SECRET_KEY:-local-docker-change-this-secret}
+      PORTFOLIO_COOKIE_SECURE: ${PORTFOLIO_COOKIE_SECURE:-false}
+      PORTFOLIO_SESSION_SECONDS: ${PORTFOLIO_SESSION_SECONDS:-43200}
+      PORTFOLIO_PRICE_REFRESH_SECONDS: ${PORTFOLIO_PRICE_REFRESH_SECONDS:-60}
+      PORTFOLIO_PRICE_REFRESH_ENABLED: ${PORTFOLIO_PRICE_REFRESH_ENABLED:-true}
+      PORTFOLIO_PRICE_REFRESH_TIMEZONE: ${PORTFOLIO_PRICE_REFRESH_TIMEZONE:-America/Edmonton}
+      PORTFOLIO_PRICE_REFRESH_START: ${PORTFOLIO_PRICE_REFRESH_START:-07:45}
+      PORTFOLIO_PRICE_REFRESH_END: ${PORTFOLIO_PRICE_REFRESH_END:-16:00}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
