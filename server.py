@@ -2,12 +2,15 @@
 import argparse
 import csv
 import hashlib
+import hmac
 import io
 import json
+import math
 import re
+import secrets
 import shutil
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from http import HTTPStatus
@@ -22,6 +25,9 @@ IMPORT_DIR = DATA_DIR / "imports"
 DB_PATH = DATA_DIR / "portfolio.db"
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+STOCK_ANALYTICS_TTL_SECONDS = 24 * 60 * 60
+PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 260_000
 
 
 def utc_now() -> str:
@@ -50,6 +56,18 @@ def parse_number(value):
         return None
 
     return -number if negative else number
+
+
+def finite_float(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def first_cell(row):
@@ -210,6 +228,28 @@ def init_db():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                last_login_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS login_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT NOT NULL,
+                success INTEGER NOT NULL DEFAULT 0,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS import_batches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL,
@@ -294,6 +334,34 @@ def init_db():
                 error TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS stock_price_history (
+                yahoo_symbol TEXT NOT NULL,
+                date TEXT NOT NULL,
+                close REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'CAD',
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (yahoo_symbol, date)
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_dividend_history (
+                yahoo_symbol TEXT NOT NULL,
+                ex_date TEXT NOT NULL,
+                dividend_per_share REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'CAD',
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (yahoo_symbol, ex_date)
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_analytics_refreshes (
+                yahoo_symbol TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'CAD',
+                fetched_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS balance_snapshots (
                 market_date TEXT PRIMARY KEY,
                 total_value REAL NOT NULL DEFAULT 0,
@@ -363,6 +431,191 @@ def get_connection():
     conn.row_factory = dict_from_row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def hash_password(password):
+    text = str(password or "")
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        text.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_HASH_ALGORITHM}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password, stored_hash):
+    try:
+        algorithm, iterations_text, salt, expected = str(stored_hash or "").split("$", 3)
+        iterations = int(iterations_text)
+    except (TypeError, ValueError):
+        return False
+
+    if algorithm != PASSWORD_HASH_ALGORITHM or iterations <= 0:
+        return False
+
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password or "").encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(digest, expected)
+
+
+def clean_username(username):
+    return str(username or "").strip()
+
+
+def public_user(row):
+    if not row:
+        return None
+    user = dict(row)
+    user.pop("password_hash", None)
+    user["is_admin"] = bool(user.get("is_admin"))
+    user["active"] = bool(user.get("active"))
+    return user
+
+
+def ensure_auth_user(username, password, is_admin=True):
+    init_db()
+    clean_name = clean_username(username)
+    if not clean_name:
+        raise ValueError("Username is required.")
+
+    with get_connection() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE username = ?", (clean_name,)).fetchone()
+        if existing:
+            return public_user(conn.execute("SELECT * FROM users WHERE id = ?", (existing["id"],)).fetchone())
+
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, active, created_at, updated_at)
+            VALUES (?, ?, ?, 1, ?, ?)
+            """,
+            (clean_name, hash_password(password), 1 if is_admin else 0, now, now),
+        )
+        return public_user(conn.execute("SELECT * FROM users WHERE username = ?", (clean_name,)).fetchone())
+
+
+def create_user(username, password, is_admin=False, active=True):
+    init_db()
+    clean_name = clean_username(username)
+    if not clean_name:
+        raise ValueError("Username is required.")
+    if len(clean_name) > 80:
+        raise ValueError("Username must be 80 characters or fewer.")
+    if not str(password or ""):
+        raise ValueError("Password is required.")
+    if len(str(password)) < 8:
+        raise ValueError("Password must be at least 8 characters.")
+
+    now = utc_now()
+    with get_connection() as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO users (username, password_hash, is_admin, active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_name,
+                    hash_password(password),
+                    1 if is_admin else 0,
+                    1 if active else 0,
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"User {clean_name} already exists.") from exc
+        return public_user(conn.execute("SELECT * FROM users WHERE username = ?", (clean_name,)).fetchone())
+
+
+def get_user_by_username(username):
+    init_db()
+    clean_name = clean_username(username)
+    if not clean_name:
+        return None
+    with get_connection() as conn:
+        return public_user(conn.execute("SELECT * FROM users WHERE username = ?", (clean_name,)).fetchone())
+
+
+def authenticate_user(username, password):
+    init_db()
+    clean_name = clean_username(username)
+    if not clean_name:
+        return None
+
+    with get_connection() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = ?", (clean_name,)).fetchone()
+        if not user or not user["active"] or not verify_password(password, user["password_hash"]):
+            return None
+
+        now = utc_now()
+        conn.execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, user["id"]))
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+        return public_user(user)
+
+
+def list_users():
+    init_db()
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, username, is_admin, active, last_login_at, created_at, updated_at
+            FROM users
+            ORDER BY username
+            """
+        ).fetchall()
+    return [public_user(row) for row in rows]
+
+
+def record_login_event(username, user_id=None, success=False, ip_address="", user_agent=""):
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO login_events (user_id, username, success, ip_address, user_agent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                clean_username(username) or "(blank)",
+                1 if success else 0,
+                str(ip_address or "")[:120],
+                str(user_agent or "")[:500],
+                utc_now(),
+            ),
+        )
+
+
+def list_login_events(limit=100):
+    init_db()
+    safe_limit = max(1, min(int(limit or 100), 500))
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                login_events.id,
+                login_events.user_id,
+                login_events.username,
+                login_events.success,
+                login_events.ip_address,
+                login_events.user_agent,
+                login_events.created_at
+            FROM login_events
+            ORDER BY login_events.created_at DESC, login_events.id DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    events = [dict(row) for row in rows]
+    for event in events:
+        event["success"] = bool(event.get("success"))
+    return events
 
 
 def upsert_account(conn, name, owner):
@@ -1695,6 +1948,503 @@ def refresh_current_prices():
         return {"status": "error", "symbol_count": len(targets), "completed_at": completed_at, "error": str(exc)}
 
 
+def parse_iso_day(value: str):
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def stock_currency_for(market):
+    return "USD" if str(market or "").strip().upper() == "US" else "CAD"
+
+
+def index_value_to_date_text(value):
+    if hasattr(value, "date"):
+        return value.date().isoformat()
+    text = str(value or "")
+    return text[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", text) else ""
+
+
+def stock_cache_meta(conn, yahoo_symbol):
+    return conn.execute(
+        """
+        SELECT *
+        FROM stock_analytics_refreshes
+        WHERE yahoo_symbol = ?
+        """,
+        (yahoo_symbol,),
+    ).fetchone()
+
+
+def stock_cache_is_stale(meta):
+    if not meta or not meta.get("fetched_at"):
+        return True
+    if meta.get("status") != "ok":
+        return True
+    try:
+        fetched_at = datetime.fromisoformat(meta["fetched_at"])
+    except ValueError:
+        return True
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - fetched_at > timedelta(seconds=STOCK_ANALYTICS_TTL_SECONDS)
+
+
+def refresh_stock_analytics(symbol, market):
+    init_db()
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    yahoo_symbol = yahoo_symbol_for(clean_symbol, clean_market)
+    if not yahoo_symbol:
+        raise ValueError("A stock symbol is required.")
+
+    fetched_at = utc_now()
+    currency = stock_currency_for(clean_market)
+
+    try:
+        import yfinance as yf
+
+        history = yf.Ticker(yahoo_symbol).history(
+            period="5y",
+            interval="1d",
+            auto_adjust=False,
+            actions=True,
+        )
+        if history is None or getattr(history, "empty", True) or "Close" not in history:
+            raise ValueError(f"No historical price data returned for {yahoo_symbol}.")
+
+        price_rows = []
+        dividend_rows = []
+        for index, row in history.iterrows():
+            date_text = index_value_to_date_text(index)
+            close = finite_float(row.get("Close"))
+            if date_text and close is not None:
+                price_rows.append((yahoo_symbol, date_text, close, currency, fetched_at))
+
+            dividend = finite_float(row.get("Dividends")) if "Dividends" in history.columns else None
+            if date_text and dividend is not None and dividend > 0:
+                dividend_rows.append((yahoo_symbol, date_text, dividend, currency, fetched_at))
+
+        if not price_rows:
+            raise ValueError(f"No usable historical prices returned for {yahoo_symbol}.")
+
+        with get_connection() as conn:
+            conn.execute("DELETE FROM stock_price_history WHERE yahoo_symbol = ?", (yahoo_symbol,))
+            conn.execute("DELETE FROM stock_dividend_history WHERE yahoo_symbol = ?", (yahoo_symbol,))
+            conn.executemany(
+                """
+                INSERT INTO stock_price_history (yahoo_symbol, date, close, currency, fetched_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol, date) DO UPDATE SET
+                    close = excluded.close,
+                    currency = excluded.currency,
+                    fetched_at = excluded.fetched_at
+                """,
+                price_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO stock_dividend_history (
+                    yahoo_symbol, ex_date, dividend_per_share, currency, fetched_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol, ex_date) DO UPDATE SET
+                    dividend_per_share = excluded.dividend_per_share,
+                    currency = excluded.currency,
+                    fetched_at = excluded.fetched_at
+                """,
+                dividend_rows,
+            )
+            conn.execute(
+                """
+                INSERT INTO stock_analytics_refreshes (
+                    yahoo_symbol, symbol, market, currency, fetched_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    market = excluded.market,
+                    currency = excluded.currency,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (yahoo_symbol, clean_symbol, clean_market, currency, fetched_at, "ok", None),
+            )
+
+        return {
+            "status": "ok",
+            "symbol": clean_symbol,
+            "market": clean_market,
+            "yahoo_symbol": yahoo_symbol,
+            "price_count": len(price_rows),
+            "dividend_count": len(dividend_rows),
+            "fetched_at": fetched_at,
+        }
+    except Exception as exc:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO stock_analytics_refreshes (
+                    yahoo_symbol, symbol, market, currency, fetched_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    market = excluded.market,
+                    currency = excluded.currency,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (yahoo_symbol, clean_symbol, clean_market, currency, fetched_at, "error", str(exc)),
+            )
+        raise
+
+
+def trailing_dividend(dividends, as_of_date):
+    cutoff = as_of_date - timedelta(days=365)
+    return sum(
+        dividend["dividend_per_share"] or 0.0
+        for dividend in dividends
+        if (parsed := parse_iso_day(dividend["ex_date"])) and cutoff < parsed <= as_of_date
+    )
+
+
+def monthly_yield_series(prices, dividends):
+    monthly_prices = {}
+    for price in prices:
+        price_date = parse_iso_day(price["date"])
+        if not price_date:
+            continue
+        month_key = price["date"][:7]
+        existing = monthly_prices.get(month_key)
+        if not existing or price["date"] > existing["date"]:
+            monthly_prices[month_key] = price
+
+    yields = []
+    for price in sorted(monthly_prices.values(), key=lambda item: item["date"]):
+        price_date = parse_iso_day(price["date"])
+        close = finite_float(price["close"])
+        if not price_date or not close:
+            continue
+        ttm = trailing_dividend(dividends, price_date)
+        if ttm <= 0:
+            continue
+        yields.append(
+            {
+                "date": price["date"],
+                "close": close,
+                "ttm_dividend": ttm,
+                "yield_pct": (ttm / close) * 100.0,
+            }
+        )
+    return yields
+
+
+def annual_forward_dividend_stats(dividends):
+    parsed_dividends = []
+    for dividend in dividends:
+        ex_date = parse_iso_day(dividend["ex_date"])
+        amount = finite_float(dividend.get("dividend_per_share"))
+        if ex_date and amount is not None and amount > 0:
+            parsed_dividends.append(
+                {
+                    "ex_date": dividend["ex_date"],
+                    "date": ex_date,
+                    "dividend_per_share": amount,
+                }
+            )
+
+    parsed_dividends.sort(key=lambda item: item["date"])
+    if not parsed_dividends:
+        return {
+            "latest_dividend": None,
+            "latest_ex_date": None,
+            "payments_per_year": 0,
+            "annual_forward_dividend": 0.0,
+        }
+
+    latest = parsed_dividends[-1]
+    payments_by_year = {}
+    for item in parsed_dividends:
+        payments_by_year[item["date"].year] = payments_by_year.get(item["date"].year, 0) + 1
+
+    completed_years = sorted(
+        (year for year, count in payments_by_year.items() if year < latest["date"].year and count > 0),
+        reverse=True,
+    )
+    if completed_years:
+        payments_per_year = payments_by_year[completed_years[0]]
+    else:
+        recent = parsed_dividends[-6:]
+        gaps = [
+            (right["date"] - left["date"]).days
+            for left, right in zip(recent, recent[1:])
+            if (right["date"] - left["date"]).days > 0
+        ]
+        if gaps:
+            median_gap = sorted(gaps)[len(gaps) // 2]
+            if median_gap <= 45:
+                payments_per_year = 12
+            elif median_gap <= 75:
+                payments_per_year = 6
+            elif median_gap <= 120:
+                payments_per_year = 4
+            elif median_gap <= 210:
+                payments_per_year = 2
+            else:
+                payments_per_year = 1
+        else:
+            payments_per_year = 1
+    annual_forward_dividend = latest["dividend_per_share"] * payments_per_year
+
+    return {
+        "latest_dividend": latest["dividend_per_share"],
+        "latest_ex_date": latest["ex_date"],
+        "payments_per_year": payments_per_year,
+        "annual_forward_dividend": annual_forward_dividend,
+    }
+
+
+def unique_stock_targets_from_holdings(holdings):
+    targets = {}
+    for holding in holdings:
+        if holding.get("asset_type") == "Cash":
+            continue
+        symbol = str(holding.get("symbol") or "").strip().upper()
+        market = str(holding.get("market") or "").strip().upper()
+        if not symbol or symbol == "CASH":
+            continue
+        yahoo_symbol = yahoo_symbol_for(symbol, market)
+        if yahoo_symbol:
+            targets[yahoo_symbol] = {"symbol": symbol, "market": market, "yahoo_symbol": yahoo_symbol}
+    return targets
+
+
+def ensure_stock_analytics_cache_for_holdings(holdings):
+    targets = unique_stock_targets_from_holdings(holdings)
+    if not targets:
+        return
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in targets)
+        existing = conn.execute(
+            f"""
+            SELECT *
+            FROM stock_analytics_refreshes
+            WHERE yahoo_symbol IN ({placeholders})
+            """,
+            list(targets),
+        ).fetchall()
+
+    cached = {
+        row["yahoo_symbol"]
+        for row in existing
+        if row["status"] == "ok" or not stock_cache_is_stale(row)
+    }
+    missing = [target for yahoo_symbol, target in targets.items() if yahoo_symbol not in cached]
+    for target in missing:
+        try:
+            refresh_stock_analytics(target["symbol"], target["market"])
+        except Exception:
+            continue
+
+
+def stock_forward_dividend_map_for_holdings(holdings):
+    targets = unique_stock_targets_from_holdings(holdings)
+    if not targets:
+        return {}
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in targets)
+        rows = conn.execute(
+            f"""
+            SELECT yahoo_symbol, ex_date, dividend_per_share
+            FROM stock_dividend_history
+            WHERE yahoo_symbol IN ({placeholders})
+            ORDER BY yahoo_symbol, ex_date
+            """,
+            list(targets),
+        ).fetchall()
+
+    dividends_by_symbol = {}
+    for row in rows:
+        dividends_by_symbol.setdefault(row["yahoo_symbol"], []).append(row)
+
+    return {
+        yahoo_symbol: annual_forward_dividend_stats(dividends_by_symbol.get(yahoo_symbol, []))
+        for yahoo_symbol in targets
+    }
+
+
+def stock_holdings(symbol, market, annual_forward_dividend=0.0):
+    summary = get_summary()
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    visible = [
+        holding
+        for holding in summary["holdings"]
+        if str(holding.get("symbol") or "").strip().upper() == clean_symbol
+        and str(holding.get("market") or "").strip().upper() == clean_market
+        and holding.get("asset_type") != "Cash"
+    ]
+
+    accounts = {}
+    for holding in visible:
+        account = accounts.setdefault(
+            holding["account_name"],
+            {
+                "account_name": holding["account_name"],
+                "quantity": 0.0,
+                "current_value": 0.0,
+                "book_value": 0.0,
+                "gain_loss": 0.0,
+            },
+        )
+        account["quantity"] += Number_or_zero(holding.get("quantity"))
+        account["current_value"] += Number_or_zero(holding.get("current_value") or holding.get("closing_value"))
+        account["book_value"] += Number_or_zero(holding.get("book_value"))
+        account["gain_loss"] += Number_or_zero(holding.get("current_gain_loss") or holding.get("gain_loss"))
+
+    account_rows = []
+    for account in accounts.values():
+        account["average_cost"] = account["book_value"] / account["quantity"] if account["quantity"] else None
+        account["annual_forward_dividend"] = annual_forward_dividend
+        account["annual_forward_income"] = account["quantity"] * annual_forward_dividend
+        account["forward_yield_on_value_pct"] = (
+            account["annual_forward_income"] / account["current_value"] * 100.0
+            if account["current_value"]
+            else None
+        )
+        account["yield_on_cost_pct"] = (
+            account["annual_forward_income"] / account["book_value"] * 100.0
+            if account["book_value"]
+            else None
+        )
+        account["gain_loss_pct"] = (
+            account["gain_loss"] / account["book_value"] * 100.0 if account["book_value"] else None
+        )
+        account_rows.append(account)
+
+    return {
+        "description": next((holding.get("description") for holding in visible if holding.get("description")), ""),
+        "accounts": sorted(account_rows, key=lambda item: item["current_value"], reverse=True),
+        "total_quantity": sum(item["quantity"] for item in account_rows),
+        "total_current_value": sum(item["current_value"] for item in account_rows),
+        "total_book_value": sum(item["book_value"] for item in account_rows),
+        "total_annual_forward_income": sum(item["annual_forward_income"] for item in account_rows),
+    }
+
+
+def Number_or_zero(value):
+    number = finite_float(value)
+    return number if number is not None else 0.0
+
+
+def get_stock_detail(symbol, market, refresh=False):
+    init_db()
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    yahoo_symbol = yahoo_symbol_for(clean_symbol, clean_market)
+    if not yahoo_symbol:
+        raise ValueError("A stock symbol is required.")
+
+    refresh_error = None
+    with get_connection() as conn:
+        meta = stock_cache_meta(conn, yahoo_symbol)
+    if refresh or stock_cache_is_stale(meta):
+        try:
+            refresh_stock_analytics(clean_symbol, clean_market)
+        except Exception as exc:
+            refresh_error = str(exc)
+
+    with get_connection() as conn:
+        meta = stock_cache_meta(conn, yahoo_symbol)
+        prices = conn.execute(
+            """
+            SELECT date, close, currency, fetched_at
+            FROM stock_price_history
+            WHERE yahoo_symbol = ?
+            ORDER BY date
+            """,
+            (yahoo_symbol,),
+        ).fetchall()
+        dividends = conn.execute(
+            """
+            SELECT ex_date, dividend_per_share, currency, fetched_at
+            FROM stock_dividend_history
+            WHERE yahoo_symbol = ?
+            ORDER BY ex_date
+            """,
+            (yahoo_symbol,),
+        ).fetchall()
+        latest_live = conn.execute(
+            """
+            SELECT price, price_currency, price_cad, quote_time, fetched_at
+            FROM latest_prices
+            WHERE symbol = ? AND market = ?
+            """,
+            (clean_symbol, clean_market),
+        ).fetchone()
+
+    latest_price_point = prices[-1] if prices else None
+    latest_price_date = latest_price_point["date"] if latest_price_point else None
+    history_price = latest_price_point["close"] if latest_price_point else None
+    current_price = latest_live["price"] if latest_live and latest_live["price"] is not None else history_price
+    current_price_date = latest_live["quote_time"] if latest_live and latest_live["quote_time"] else latest_price_date
+    currency = (
+        latest_live["price_currency"]
+        if latest_live and latest_live["price_currency"]
+        else (latest_price_point["currency"] if latest_price_point else stock_currency_for(clean_market))
+    )
+
+    latest_date = parse_iso_day(latest_price_date) if latest_price_date else None
+    ttm = trailing_dividend(dividends, latest_date) if latest_date else 0.0
+    forward_stats = annual_forward_dividend_stats(dividends)
+    current_yield_pct = (ttm / current_price * 100.0) if ttm and current_price else None
+    forward_yield_pct = (
+        forward_stats["annual_forward_dividend"] / current_price * 100.0
+        if forward_stats["annual_forward_dividend"] and current_price
+        else None
+    )
+    monthly_yields = monthly_yield_series(prices, dividends)
+    five_year_avg_yield_pct = (
+        sum(item["yield_pct"] for item in monthly_yields) / len(monthly_yields) if monthly_yields else None
+    )
+    holdings = stock_holdings(clean_symbol, clean_market, forward_stats["annual_forward_dividend"])
+
+    return {
+        "symbol": clean_symbol,
+        "market": clean_market,
+        "yahoo_symbol": yahoo_symbol,
+        "description": holdings["description"],
+        "currency": currency,
+        "fetched_at": meta["fetched_at"] if meta else None,
+        "status": meta["status"] if meta else "empty",
+        "error": refresh_error or (meta["error"] if meta else None),
+        "stats": {
+            "current_price": current_price,
+            "current_price_date": current_price_date,
+            "ttm_dividend": ttm,
+            "latest_dividend": forward_stats["latest_dividend"],
+            "latest_ex_date": forward_stats["latest_ex_date"],
+            "payments_per_year": forward_stats["payments_per_year"],
+            "annual_forward_dividend": forward_stats["annual_forward_dividend"],
+            "current_yield_pct": current_yield_pct,
+            "forward_yield_pct": forward_yield_pct,
+            "five_year_avg_yield_pct": five_year_avg_yield_pct,
+            "price_count": len(prices),
+            "dividend_count": len(dividends),
+        },
+        "prices": prices,
+        "dividends": dividends,
+        "monthly_yields": monthly_yields,
+        "holdings": holdings,
+    }
+
+
 def latest_batch_filter_sql():
     return """
         SELECT MAX(import_batches.id)
@@ -1855,6 +2605,8 @@ def get_summary():
 
     security_count = len(holdings)
     holdings = holdings + cash_holdings
+    ensure_stock_analytics_cache_for_holdings(holdings)
+    forward_dividends_by_symbol = stock_forward_dividend_map_for_holdings(holdings)
     price_by_symbol = {
         (row["symbol"], row["market"]): row
         for row in price_rows
@@ -1869,6 +2621,12 @@ def get_summary():
             holding["day_change"] = 0.0
             holding["day_change_pct"] = 0.0
             holding["day_value_change"] = 0.0
+            holding["previous_value"] = amount
+            holding["annual_forward_dividend"] = 0.0
+            holding["annual_forward_income"] = 0.0
+            holding["payments_per_year"] = 0
+            holding["latest_dividend"] = None
+            holding["latest_ex_date"] = None
             holding["current_value"] = holding["closing_value"] or 0.0
             holding["current_gain_loss"] = 0.0
             holding["current_gain_loss_pct"] = 0.0
@@ -1882,6 +2640,15 @@ def get_summary():
         current_value = (quantity * current_price) if current_price is not None else (holding["closing_value"] or 0.0)
         current_gain = current_value - (holding["book_value"] or 0.0)
         current_gain_pct = (current_gain / (holding["book_value"] or 0.0) * 100.0) if holding["book_value"] else None
+        previous_close_cad = price_row["previous_close_cad"] if price_row else None
+        previous_value = (
+            previous_close_cad * quantity
+            if previous_close_cad is not None
+            else (holding["closing_value"] or 0.0)
+        )
+        yahoo_symbol = price_row["yahoo_symbol"] if price_row else yahoo_symbol_for(holding["symbol"], holding["market"])
+        forward_stats = forward_dividends_by_symbol.get(yahoo_symbol, {})
+        annual_forward_dividend = forward_stats.get("annual_forward_dividend") or 0.0
 
         holding["current_price"] = current_price
         holding["current_price_source"] = "yfinance" if has_live_price else "import"
@@ -1889,13 +2656,19 @@ def get_summary():
         holding["source_price"] = price_row["price"] if price_row else None
         holding["source_price_currency"] = price_row["price_currency"] if price_row else None
         holding["fx_to_cad"] = price_row["fx_to_cad"] if price_row else 1.0
-        holding["yahoo_symbol"] = price_row["yahoo_symbol"] if price_row else yahoo_symbol_for(holding["symbol"], holding["market"])
+        holding["yahoo_symbol"] = yahoo_symbol
         holding["current_price_fetched_at"] = price_row["fetched_at"] if price_row else None
         holding["price_quote_time"] = price_row["quote_time"] if price_row else None
-        holding["previous_close"] = price_row["previous_close_cad"] if price_row else None
+        holding["previous_close"] = previous_close_cad
+        holding["previous_value"] = previous_value
         holding["day_change"] = price_row["day_change"] if price_row else None
         holding["day_change_pct"] = price_row["day_change_pct"] if price_row else None
         holding["day_value_change"] = (holding["day_change"] or 0.0) * quantity if holding["day_change"] is not None else None
+        holding["latest_dividend"] = forward_stats.get("latest_dividend")
+        holding["latest_ex_date"] = forward_stats.get("latest_ex_date")
+        holding["payments_per_year"] = forward_stats.get("payments_per_year") or 0
+        holding["annual_forward_dividend"] = annual_forward_dividend
+        holding["annual_forward_income"] = annual_forward_dividend * quantity
         holding["current_price_error"] = price_row["error"] if price_row else None
         holding["current_value"] = current_value
         holding["current_gain_loss"] = current_gain

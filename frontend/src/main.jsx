@@ -26,11 +26,28 @@ const performanceRanges = [
   ["max", "Max"],
 ];
 const dayMs = 24 * 60 * 60 * 1000;
+const accountDisplayOrder = [
+  ["jamie rrsp", 0],
+  ["michelle rrsp", 1],
+  ["michelle rsp", 1],
+  ["resp", 2],
+  ["jamie tfsa", 3],
+  ["jamie tfsac", 3],
+  ["michelle tfsa", 4],
+  ["jamie cash", 5],
+  ["michelle cash", 6],
+];
 
 const money = new Intl.NumberFormat("en-CA", {
   style: "currency",
   currency: "CAD",
   maximumFractionDigits: 2,
+});
+
+const wholeMoney = new Intl.NumberFormat("en-CA", {
+  style: "currency",
+  currency: "CAD",
+  maximumFractionDigits: 0,
 });
 
 const number = new Intl.NumberFormat("en-CA", {
@@ -41,6 +58,18 @@ class AuthError extends Error {}
 
 function formatMoney(value) {
   return money.format(Number(value || 0));
+}
+
+function formatWholeMoney(value) {
+  return wholeMoney.format(Number(value || 0));
+}
+
+function formatCurrency(value, currency = "CAD") {
+  return new Intl.NumberFormat("en-CA", {
+    style: "currency",
+    currency: currency || "CAD",
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0));
 }
 
 function formatPercent(value) {
@@ -67,10 +96,55 @@ function formatMarketDate(value) {
   return new Intl.DateTimeFormat("en-CA", { dateStyle: "medium" }).format(new Date(parsed));
 }
 
+function tickerLabel(holding) {
+  const symbol = String(holding?.symbol || "").trim().toUpperCase();
+  const market = String(holding?.market || "").trim().toUpperCase();
+  if (!symbol || symbol === "CASH") return symbol;
+  if (["CDN", "CAN", "CA", "TSX", "TSXV"].includes(market)) return `TSE:${symbol}`;
+  if (market === "US") return symbol;
+  return market ? `${market}:${symbol}` : symbol;
+}
+
+function formatFx(value) {
+  const fx = Number(value || 1);
+  return Number.isInteger(fx) ? String(fx) : fx.toFixed(4);
+}
+
 function shortAccountName(name) {
   return String(name || "")
     .replace(/^\d+\s+/, "")
     .replace(/\s+-\s+Combined Holdings$/i, "");
+}
+
+function accountDisplayRank(account) {
+  const name = shortAccountName(account.name).toLowerCase();
+  const match = accountDisplayOrder.find(([label]) => name === label);
+  return match ? match[1] : 99;
+}
+
+function sortAccountsForDisplay(accounts) {
+  return [...accounts].sort((left, right) => {
+    const rankDiff = accountDisplayRank(left) - accountDisplayRank(right);
+    if (rankDiff) return rankDiff;
+    return shortAccountName(left.name).localeCompare(shortAccountName(right.name));
+  });
+}
+
+function isRetirementIncomeAccount(name) {
+  const label = shortAccountName(name).toLowerCase();
+  return ["jamie rrsp", "jamie rsp", "michelle rrsp", "michelle rsp"].includes(label);
+}
+
+function incomeByAccountFromHoldings(holdings) {
+  return (holdings || []).reduce((incomeByAccount, holding) => {
+    const accountName = holding.account_name;
+    if (!accountName) return incomeByAccount;
+    incomeByAccount.set(
+      accountName,
+      (incomeByAccount.get(accountName) || 0) + Number(holding.annual_forward_income || 0)
+    );
+    return incomeByAccount;
+  }, new Map());
 }
 
 function toneClass(value) {
@@ -101,11 +175,16 @@ function apiFetch(path, options = {}) {
 }
 
 function App() {
-  const [auth, setAuth] = useState({ status: "checking", username: null });
+  const [auth, setAuth] = useState({ status: "checking", username: null, isAdmin: false });
   const [data, setData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
+  const [usersData, setUsersData] = useState(null);
   const [activeView, setActiveView] = useState("summary");
   const [activeAccountId, setActiveAccountId] = useState(null);
+  const [activeStock, setActiveStock] = useState(null);
+  const [stockData, setStockData] = useState(null);
+  const [stockLoading, setStockLoading] = useState(false);
+  const [stockError, setStockError] = useState("");
   const [accountQuery, setAccountQuery] = useState("");
   const [sort, setSort] = useState({ key: "current_value", direction: "desc" });
   const [message, setMessage] = useState(null);
@@ -129,6 +208,12 @@ function App() {
     setHistoryData(payload);
   }
 
+  async function loadUsers() {
+    const response = await apiFetch("/api/users");
+    const payload = await parseApiResponse(response);
+    setUsersData(payload);
+  }
+
   useEffect(() => {
     checkSession();
   }, []);
@@ -141,7 +226,7 @@ function App() {
     const timer = window.setInterval(() => {
       loadSummary().catch((error) => {
         if (error instanceof AuthError) {
-          setAuth({ status: "anonymous", username: null });
+          setAuth({ status: "anonymous", username: null, isAdmin: false });
         } else {
           showMessage(error.message, true);
         }
@@ -154,14 +239,14 @@ function App() {
     try {
       const response = await apiFetch("/api/me");
       const payload = await parseApiResponse(response);
-      setAuth({ status: "authenticated", username: payload.username });
+      setAuth({ status: "authenticated", username: payload.username, isAdmin: Boolean(payload.is_admin) });
       await loadSummary();
     } catch (error) {
       if (error instanceof AuthError) {
-        setAuth({ status: "anonymous", username: null });
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
         return;
       }
-      setAuth({ status: "anonymous", username: null });
+      setAuth({ status: "anonymous", username: null, isAdmin: false });
       showMessage(error.message, true);
     }
   }
@@ -186,7 +271,7 @@ function App() {
         body: JSON.stringify(payload),
       });
       const result = await parseApiResponse(response);
-      setAuth({ status: "authenticated", username: result.username });
+      setAuth({ status: "authenticated", username: result.username, isAdmin: Boolean(result.is_admin) });
       form.reset();
       await loadSummary();
     } catch (error) {
@@ -200,23 +285,86 @@ function App() {
     await apiFetch("/api/logout", { method: "POST" }).catch(() => null);
     setData(null);
     setHistoryData(null);
-    setAuth({ status: "anonymous", username: null });
+    setUsersData(null);
+    setAuth({ status: "anonymous", username: null, isAdmin: false });
   }
 
   function activateView(view, accountId = null) {
     setActiveView(view);
     setActiveAccountId(accountId ? Number(accountId) : null);
+    if (view !== "stock") {
+      setActiveStock(null);
+      setStockError("");
+    }
     if (view !== "account" && sort.key === "account_weight") {
       setSort({ key: "current_value", direction: "desc" });
     }
     if (view === "history" || (view === "account" && !historyData)) {
       loadHistory().catch((error) => {
         if (error instanceof AuthError) {
-          setAuth({ status: "anonymous", username: null });
+          setAuth({ status: "anonymous", username: null, isAdmin: false });
         } else {
           showMessage(error.message, true);
         }
       });
+    }
+    if (view === "users") {
+      loadUsers().catch((error) => {
+        if (error instanceof AuthError) {
+          setAuth({ status: "anonymous", username: null, isAdmin: false });
+        } else {
+          showMessage(error.message, true);
+        }
+      });
+    }
+  }
+
+  async function loadStock(stock, refresh = false) {
+    if (!stock?.symbol) {
+      return;
+    }
+
+    const params = new URLSearchParams();
+    if (stock.market) params.set("market", stock.market);
+    if (refresh) params.set("refresh", "true");
+    setStockLoading(true);
+    setStockError("");
+    try {
+      const response = await apiFetch(`/api/stocks/${encodeURIComponent(stock.symbol)}?${params.toString()}`);
+      const payload = await parseApiResponse(response);
+      setStockData(payload);
+      if (payload.error) {
+        setStockError(payload.error);
+      }
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      } else {
+        setStockError(error.message);
+      }
+    } finally {
+      setStockLoading(false);
+    }
+  }
+
+  function openStock(holding) {
+    if (!holding?.symbol || String(holding.symbol).toUpperCase() === "CASH") {
+      return;
+    }
+    const stock = {
+      symbol: holding.symbol,
+      market: holding.market || "",
+    };
+    setActiveStock(stock);
+    setStockData(null);
+    setActiveView("stock");
+    setActiveAccountId(null);
+    loadStock(stock);
+  }
+
+  function refreshActiveStock() {
+    if (activeStock) {
+      loadStock(activeStock, true);
     }
   }
 
@@ -253,7 +401,7 @@ function App() {
       await loadSummary();
     } catch (error) {
       if (error instanceof AuthError) {
-        setAuth({ status: "anonymous", username: null });
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
       }
       showMessage(error.message, true);
     } finally {
@@ -286,7 +434,7 @@ function App() {
       await loadSummary();
     } catch (error) {
       if (error instanceof AuthError) {
-        setAuth({ status: "anonymous", username: null });
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
       }
       showMessage(error.message, true);
     } finally {
@@ -321,7 +469,41 @@ function App() {
       setActiveView("accounts");
     } catch (error) {
       if (error instanceof AuthError) {
-        setAuth({ status: "anonymous", username: null });
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleCreateUser(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button");
+    const formData = new FormData(form);
+    const payload = {
+      username: formData.get("username"),
+      password: formData.get("password"),
+      is_admin: formData.get("is_admin") === "on",
+      active: formData.get("active") === "on",
+    };
+
+    button.disabled = true;
+    try {
+      const response = await apiFetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await parseApiResponse(response);
+      setUsersData({ users: result.users, login_events: result.login_events });
+      form.reset();
+      form.elements.active.checked = true;
+      showMessage(`Created user ${result.user.username}.`);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
       }
       showMessage(error.message, true);
     } finally {
@@ -372,7 +554,9 @@ function App() {
           onOpenAccounts={() => activateView("accounts")}
           onOpenImports={() => activateView("imports")}
           onOpenHistory={() => activateView("history")}
+          onOpenUsers={() => activateView("users")}
           onLogout={handleLogout}
+          isAdmin={auth.isAdmin}
         />
       </header>
 
@@ -404,6 +588,18 @@ function App() {
               onQuery={setAccountQuery}
               onSort={changeSort}
               onActivate={activateView}
+              onOpenStock={openStock}
+            />
+          )}
+
+          {activeView === "stock" && (
+            <StockPage
+              stock={stockData}
+              loading={stockLoading}
+              error={stockError}
+              requestedStock={activeStock}
+              onBack={() => activateView("summary")}
+              onRefresh={refreshActiveStock}
             />
           )}
 
@@ -427,6 +623,10 @@ function App() {
               onFileChange={(event) => setHistoryFileLabel(event.target.files[0]?.name || "Choose CSV")}
               onUpload={handleHistoryImport}
             />
+          )}
+
+          {activeView === "users" && auth.isAdmin && (
+            <UsersAdminPage data={usersData} onSubmit={handleCreateUser} onRefresh={loadUsers} />
           )}
         </section>
       </main>
@@ -466,7 +666,9 @@ function ImportForm({
   onOpenAccounts,
   onOpenImports,
   onOpenHistory,
+  onOpenUsers,
   onLogout,
+  isAdmin,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -511,6 +713,11 @@ function ImportForm({
             <button type="button" onClick={() => runMenuAction(onOpenHistory)}>
               History
             </button>
+            {isAdmin ? (
+              <button type="button" onClick={() => runMenuAction(onOpenUsers)}>
+                Users
+              </button>
+            ) : null}
             <button type="button" onClick={() => runMenuAction(onLogout)}>
               Sign Out
             </button>
@@ -522,12 +729,14 @@ function ImportForm({
 }
 
 function Tabs({ accounts, activeView, activeAccountId, onActivate }) {
+  const orderedAccounts = sortAccountsForDisplay(accounts);
+
   return (
     <div className="tabs" role="tablist" aria-label="Portfolio pages">
       <button className={`tab ${activeView === "summary" ? "active" : ""}`} onClick={() => onActivate("summary")}>
         Summary
       </button>
-      {accounts.map((account) => (
+      {orderedAccounts.map((account) => (
         <button
           key={account.id}
           className={`tab ${activeView === "account" && activeAccountId === account.id ? "active" : ""}`}
@@ -541,66 +750,46 @@ function Tabs({ accounts, activeView, activeAccountId, onActivate }) {
 }
 
 function SummaryPage({ data, onActivate }) {
+  const incomeByAccount = incomeByAccountFromHoldings(data.holdings);
+  const totalIncome = Array.from(incomeByAccount.values()).reduce((sum, income) => sum + income, 0);
+  const retirementIncome = data.accounts
+    .filter((account) => isRetirementIncomeAccount(account.name))
+    .reduce((sum, account) => sum + (incomeByAccount.get(account.name) || 0), 0);
+
   return (
     <section className="view active">
       <Metrics
         metrics={[
           ["Current Value", data.totals.current_value ?? data.totals.closing_value],
-          ["Book Value", data.totals.book_value],
+          ["Income", totalIncome],
+          ["Retirement Income", retirementIncome],
           ["Day Change", data.totals.day_change, "tone"],
           ["Current Gain", data.totals.current_gain_loss ?? data.totals.gain_loss, "tone"],
           ["Current Return", data.totals.current_gain_loss_pct ?? data.totals.gain_loss_pct, "percentTone"],
         ]}
       />
-      <PriceRefreshStatus status={data.price_refresh} />
-      <BalanceSnapshotStatus snapshot={data.balance_snapshot?.latest} />
 
       <section className="section-panel">
         <div className="panel-heading">
           <h2>Accounts</h2>
         </div>
-        <AccountSummaryTable accounts={data.accounts} onActivate={onActivate} />
+        <AccountSummaryTable accounts={data.accounts} incomeByAccount={incomeByAccount} onActivate={onActivate} />
       </section>
+      <PriceUpdateFooter status={data.price_refresh} />
     </section>
   );
 }
 
-function BalanceSnapshotStatus({ snapshot }) {
-  if (!snapshot) {
-    return null;
-  }
-
-  return (
-    <div className="price-status">
-      <span>Last saved close {snapshot.market_date}</span>
-      <span>{formatMoney(snapshot.total_value)}</span>
-      {snapshot.updated_at ? <span>Saved {formatDate(snapshot.updated_at)}</span> : null}
-    </div>
-  );
-}
-
-function PriceRefreshStatus({ status }) {
+function PriceUpdateFooter({ status }) {
   if (!status) {
-    return null;
+    return <div className="price-update-footer">Last price update pending</div>;
   }
 
   const refresh = status.refresh || {};
-  const schedule = status.schedule || {};
   const latest = status.latest_fetched_at || refresh.completed_at;
   return (
-    <div className={`price-status ${refresh.status === "error" ? "error" : ""}`}>
-      <span>{status.price_count || 0} live prices</span>
-      {latest ? <span>Last price update {formatDate(latest)}</span> : <span>Waiting for first price refresh</span>}
-      {schedule.start && schedule.end ? (
-        <span>
-          Fetch window {schedule.start}-{schedule.end} {schedule.timezone || ""}
-          {schedule.in_window === false ? " (paused)" : ""}
-        </span>
-      ) : null}
-      {status.total_day_change !== null && status.total_day_change !== undefined ? (
-        <span className={toneClass(status.total_day_change)}>Daily price change {formatMoney(status.total_day_change)}</span>
-      ) : null}
-      {refresh.error ? <span>{refresh.error}</span> : null}
+    <div className="price-update-footer">
+      {latest ? `Last price update ${formatDate(latest)}` : "Last price update pending"}
     </div>
   );
 }
@@ -923,11 +1112,11 @@ function AccountPerformanceChart({ series, loading }) {
   );
 }
 
-function AccountPage({ account, holdings, history, query, sort, onQuery, onSort, onActivate }) {
+function AccountPage({ account, holdings, history, query, sort, onQuery, onSort, onActivate, onOpenStock }) {
   const accountHoldings = useMemo(
     () =>
       holdings
-        .filter((holding) => holding.account_name === account.name)
+        .filter((holding) => holding.account_name === account.name && holding.asset_type !== "Cash")
         .map((holding) => ({
           ...holding,
           account_weight: account.current_total_value
@@ -950,18 +1139,6 @@ function AccountPage({ account, holdings, history, query, sort, onQuery, onSort,
     [history, account.id]
   );
 
-  const allocation = accountHoldings
-    .filter((holding) => Number(holding.closing_value || 0) > 0)
-    .sort((a, b) => Number(b.closing_value || 0) - Number(a.closing_value || 0))
-    .map((holding) => ({
-      symbol: holding.symbol,
-      description: holding.description,
-      closing_value: holding.current_value ?? holding.closing_value,
-      currency: holding.currency,
-      account_name: holding.account_name,
-      portfolio_pct: holding.account_weight,
-    }));
-
   return (
     <section className="view active">
       <div className="account-header">
@@ -969,50 +1146,396 @@ function AccountPage({ account, holdings, history, query, sort, onQuery, onSort,
           <h2>{account.name}</h2>
           <p>{account.report_timestamp || ""}</p>
         </div>
-        <button className="quiet-button" onClick={() => onActivate("summary")}>
-          Summary
-        </button>
+        <div className="header-actions">
+          <div className="account-cash-pill">
+            <span>Cash</span>
+            <strong>{formatMoney(account.cash_balance || 0)}</strong>
+          </div>
+          <button className="quiet-button" onClick={() => onActivate("summary")}>
+            Summary
+          </button>
+        </div>
       </div>
-
-      <Metrics
-        metrics={[
-          ["Account Value", account.total_closing_value],
-          ["Current Value", account.current_total_value ?? account.total_closing_value],
-          ["Book Value", account.total_book_value],
-          ["Day Change", account.day_change, "tone"],
-          ["Current Gain", account.current_total_gain_loss ?? account.total_gain_loss, "tone"],
-          ["Current Return", account.current_total_gain_loss_pct ?? account.total_gain_loss_pct, "percentTone"],
-          ["Cash", account.cash_balance || 0],
-        ]}
-      />
-
-      <section className="summary-grid account-insights-grid">
-        <section className="section-panel">
-          <div className="panel-heading">
-            <h2>Account Allocation</h2>
-          </div>
-          <Allocation allocation={allocation} />
-        </section>
-
-        <section className="section-panel">
-          <div className="panel-heading">
-            <h2>Monthly Change</h2>
-          </div>
-          <AccountMonthlyPivot pivot={monthlyPivot} loading={!history} accountName={account.name} />
-          <AccountPerformanceChart series={performanceSeries} loading={!history} />
-        </section>
-      </section>
 
       <section className="section-panel">
         <TableToolbar value={query} onChange={onQuery} count={sortedAccountHoldings.length} placeholder="Filter account holdings" />
         <HoldingsTable
           holdings={sortedAccountHoldings}
+          accountName={account.name}
           sort={sort}
           weightKey="account_weight"
           showAccount={false}
           onSort={onSort}
+          onOpenStock={onOpenStock}
         />
       </section>
+
+      <section className="summary-grid account-history-grid">
+        <section className="section-panel">
+          <div className="panel-heading">
+            <h2>Monthly Change</h2>
+          </div>
+          <AccountMonthlyPivot pivot={monthlyPivot} loading={!history} accountName={account.name} />
+        </section>
+
+        <section className="section-panel">
+          <div className="panel-heading">
+            <h2>Performance History</h2>
+          </div>
+          <AccountPerformanceChart series={performanceSeries} loading={!history} />
+        </section>
+      </section>
+    </section>
+  );
+}
+
+function stockPointTime(date) {
+  const parsed = Date.parse(`${date}T00:00:00`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function StockPriceChart({ prices, currency }) {
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const series = (prices || [])
+    .map((point) => ({
+      date: point.date,
+      time: stockPointTime(point.date),
+      value: Number(point.close || 0),
+    }))
+    .filter((point) => point.time && point.value > 0);
+
+  if (series.length < 2) {
+    return <div className="empty-state">No price history available yet.</div>;
+  }
+
+  const width = 900;
+  const height = 260;
+  const pad = { top: 18, right: 22, bottom: 26, left: 96 };
+  const first = series[0];
+  const latest = series[series.length - 1];
+  const values = series.map((point) => point.value);
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const padding = (max - min) * 0.08;
+  min -= padding;
+  max += padding;
+  const valueRange = max - min || 1;
+  const timeRange = latest.time - first.time || 1;
+
+  function x(point) {
+    return pad.left + ((point.time - first.time) / timeRange) * (width - pad.left - pad.right);
+  }
+
+  function y(value) {
+    return height - pad.bottom - ((Number(value || 0) - min) / valueRange) * (height - pad.top - pad.bottom);
+  }
+
+  function handleMove(event) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const pointerX = ((event.clientX - bounds.left) / bounds.width) * width;
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+    series.forEach((point, index) => {
+      const distance = Math.abs(x(point) - pointerX);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+    setHoveredIndex(nearestIndex);
+  }
+
+  const line = series.map((point) => `${x(point).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ");
+  const gridValues = [min + padding, min + valueRange / 2, max - padding];
+  const hoveredPoint =
+    hoveredIndex === null ? null : series[Math.min(Math.max(hoveredIndex, 0), series.length - 1)];
+  const hoveredX = hoveredPoint ? x(hoveredPoint) : 0;
+  const hoveredY = hoveredPoint ? y(hoveredPoint.value) : 0;
+  const tooltipWidth = 164;
+  const tooltipHeight = 44;
+  const tooltipX = Math.min(Math.max(hoveredX + 12, pad.left), width - pad.right - tooltipWidth);
+  const tooltipY = Math.max(pad.top, hoveredY - tooltipHeight - 10);
+
+  return (
+    <div className="stock-chart-wrap">
+      <svg
+        className="stock-chart"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Historical stock price chart"
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoveredIndex(null)}
+      >
+        {gridValues.map((value) => {
+          const lineY = y(value);
+          return (
+            <g key={value}>
+              <line x1={pad.left} x2={width - pad.right} y1={lineY} y2={lineY} />
+              <text x={pad.left - 10} y={lineY + 4}>
+                {formatCurrency(value, currency)}
+              </text>
+            </g>
+          );
+        })}
+        <polyline points={line} />
+        {hoveredPoint ? (
+          <g>
+            <line className="stock-hover-line" x1={hoveredX} x2={hoveredX} y1={pad.top} y2={height - pad.bottom} />
+            <circle className="stock-hover-dot" cx={hoveredX} cy={hoveredY} r="4.5" />
+            <g className="performance-tooltip">
+              <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx="6" />
+              <text x={tooltipX + 10} y={tooltipY + 17}>
+                {formatMarketDate(hoveredPoint.date)}
+              </text>
+              <text className="tooltip-value" x={tooltipX + 10} y={tooltipY + 34}>
+                {formatCurrency(hoveredPoint.value, currency)}
+              </text>
+            </g>
+          </g>
+        ) : null}
+      </svg>
+    </div>
+  );
+}
+
+function StockDividendChart({ dividends, currency }) {
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const series = (dividends || [])
+    .map((point) => ({
+      date: point.ex_date,
+      time: stockPointTime(point.ex_date),
+      value: Number(point.dividend_per_share || 0),
+    }))
+    .filter((point) => point.time && point.value > 0);
+
+  if (!series.length) {
+    return <div className="empty-state">No dividend history available yet.</div>;
+  }
+
+  const width = 900;
+  const height = 220;
+  const pad = { top: 18, right: 22, bottom: 26, left: 96 };
+  const first = series[0];
+  const latest = series[series.length - 1];
+  const max = Math.max(...series.map((point) => point.value)) || 1;
+  const timeRange = latest.time - first.time || 1;
+  const barWidth = Math.max(4, Math.min(18, (width - pad.left - pad.right) / Math.max(series.length, 1) - 3));
+
+  function x(point) {
+    return pad.left + ((point.time - first.time) / timeRange) * (width - pad.left - pad.right);
+  }
+
+  function y(value) {
+    return height - pad.bottom - (Number(value || 0) / max) * (height - pad.top - pad.bottom);
+  }
+
+  function handleMove(event) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const pointerX = ((event.clientX - bounds.left) / bounds.width) * width;
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+    series.forEach((point, index) => {
+      const distance = Math.abs(x(point) - pointerX);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+    setHoveredIndex(nearestIndex);
+  }
+
+  const gridValues = [max / 2, max];
+  const hoveredPoint =
+    hoveredIndex === null ? null : series[Math.min(Math.max(hoveredIndex, 0), series.length - 1)];
+  const hoveredX = hoveredPoint ? x(hoveredPoint) : 0;
+  const hoveredY = hoveredPoint ? y(hoveredPoint.value) : 0;
+  const tooltipWidth = 170;
+  const tooltipHeight = 44;
+  const tooltipX = Math.min(Math.max(hoveredX + 12, pad.left), width - pad.right - tooltipWidth);
+  const tooltipY = Math.max(pad.top, hoveredY - tooltipHeight - 10);
+
+  return (
+    <div className="stock-chart-wrap">
+      <svg
+        className="stock-chart stock-dividend-chart"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Historical dividend chart"
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoveredIndex(null)}
+      >
+        {gridValues.map((value) => {
+          const lineY = y(value);
+          return (
+            <g key={value}>
+              <line x1={pad.left} x2={width - pad.right} y1={lineY} y2={lineY} />
+              <text x={pad.left - 10} y={lineY + 4}>
+                {formatCurrency(value, currency)}
+              </text>
+            </g>
+          );
+        })}
+        {series.map((point) => {
+          const barX = x(point) - barWidth / 2;
+          const barY = y(point.value);
+          return (
+            <rect
+              key={point.date}
+              x={barX}
+              y={barY}
+              width={barWidth}
+              height={height - pad.bottom - barY}
+              rx="2"
+            />
+          );
+        })}
+        {hoveredPoint ? (
+          <g>
+            <line className="stock-hover-line" x1={hoveredX} x2={hoveredX} y1={pad.top} y2={height - pad.bottom} />
+            <circle className="stock-hover-dot" cx={hoveredX} cy={hoveredY} r="4.5" />
+            <g className="performance-tooltip">
+              <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx="6" />
+              <text x={tooltipX + 10} y={tooltipY + 17}>
+                Ex {formatMarketDate(hoveredPoint.date)}
+              </text>
+              <text className="tooltip-value" x={tooltipX + 10} y={tooltipY + 34}>
+                {formatCurrency(hoveredPoint.value, currency)}
+              </text>
+            </g>
+          </g>
+        ) : null}
+      </svg>
+    </div>
+  );
+}
+
+function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh }) {
+  const displaySymbol = stock?.yahoo_symbol || requestedStock?.symbol || "Stock";
+  const currency = stock?.currency || "CAD";
+  const stats = stock?.stats || {};
+  const dividends = stock?.dividends || [];
+  const recentDividends = [...dividends].slice(-8).reverse();
+  const accounts = stock?.holdings?.accounts || [];
+
+  return (
+    <section className="view active">
+      <div className="account-header">
+        <div>
+          <h2>{displaySymbol}</h2>
+          <p>{stock?.description || "Stock analytics"}</p>
+        </div>
+        <div className="header-actions">
+          <button className="quiet-button" type="button" onClick={onBack}>
+            Summary
+          </button>
+          <button className="quiet-button" type="button" onClick={onRefresh} disabled={loading || !requestedStock}>
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {error ? <div className="message error">{error}</div> : null}
+      {loading && !stock ? <div className="empty-state">Loading stock analytics...</div> : null}
+
+      {stock ? (
+        <>
+          <Metrics
+            metrics={[
+              ["Current Price", formatCurrency(stats.current_price, currency), "raw"],
+              ["TTM Dividend", formatCurrency(stats.ttm_dividend, currency), "raw"],
+              ["Annual Forward Dividend", formatCurrency(stats.annual_forward_dividend, currency), "raw"],
+              ["Forward Yield", stats.forward_yield_pct, "percentTone"],
+              ["5Y Avg Yield", stats.five_year_avg_yield_pct, "percentTone"],
+              ["Payments / Year", `${stats.payments_per_year || 0}`, "raw"],
+            ]}
+          />
+
+          <section className="summary-grid stock-detail-grid">
+            <section className="section-panel">
+              <div className="panel-heading">
+                <h2>Historical Price</h2>
+                <span>{stats.price_count || 0} closes</span>
+              </div>
+              <StockPriceChart prices={stock.prices} currency={currency} />
+            </section>
+
+            <section className="section-panel">
+              <div className="panel-heading">
+                <h2>Historical Dividends</h2>
+                <span>{stats.dividend_count || 0} ex-dividend events</span>
+              </div>
+              <StockDividendChart dividends={dividends} currency={currency} />
+              <div className="stock-forward-note">
+                Latest payment {formatCurrency(stats.latest_dividend, currency)}
+                {stats.latest_ex_date ? ` ex ${formatMarketDate(stats.latest_ex_date)}` : ""} x{" "}
+                {stats.payments_per_year || 0} payments = {formatCurrency(stats.annual_forward_dividend, currency)} AFD.
+              </div>
+              <div className="stock-dividend-list">
+                {recentDividends.map((dividend) => (
+                  <div key={dividend.ex_date} className="stock-dividend-row">
+                    <span>{formatMarketDate(dividend.ex_date)}</span>
+                    <strong>{formatCurrency(dividend.dividend_per_share, currency)}</strong>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </section>
+
+          <section className="section-panel">
+            <div className="panel-heading">
+              <h2>Held In Accounts</h2>
+              <span>
+                {number.format(stock.holdings?.total_quantity || 0)} shares -{" "}
+                {formatMoney(stock.holdings?.total_annual_forward_income || 0)} annual forward income
+              </span>
+            </div>
+            {accounts.length ? (
+              <div className="table-wrap">
+                <table className="stock-holdings-table">
+                  <thead>
+                    <tr>
+                      <th>Account</th>
+                      <th className="numeric">Shares</th>
+                      <th className="numeric">Avg Cost</th>
+                      <th className="numeric">Value</th>
+                      <th className="numeric">Annual Income</th>
+                      <th className="numeric">Gain</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {accounts.map((account) => (
+                      <tr key={account.account_name}>
+                        <td>{shortAccountName(account.account_name)}</td>
+                        <td className="numeric">{number.format(account.quantity || 0)}</td>
+                        <td className="numeric">{formatCurrency(account.average_cost, currency)}</td>
+                        <td className="numeric">{formatMoney(account.current_value)}</td>
+                        <td className="numeric">
+                          {formatMoney(account.annual_forward_income)}
+                          <div className="row-sub">{formatPercent(account.yield_on_cost_pct)} on cost</div>
+                        </td>
+                        <td className={`numeric ${toneClass(account.gain_loss)}`}>
+                          {formatMoney(account.gain_loss)}
+                          <div className="row-sub">{formatPercent(account.gain_loss_pct)}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="empty-state">No current holdings found for this symbol.</div>
+            )}
+          </section>
+
+          <div className="price-update-footer">
+            {stock.fetched_at ? `Stock analytics updated ${formatDate(stock.fetched_at)}` : "Stock analytics pending"}
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -1125,6 +1648,134 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
             )}
           </div>
         </section>
+      </section>
+    </section>
+  );
+}
+
+function UsersAdminPage({ data, onSubmit, onRefresh }) {
+  const users = data?.users || [];
+  const events = data?.login_events || [];
+
+  return (
+    <section className="view active">
+      <section className="summary-grid admin-grid">
+        <form className="section-panel account-setup-form" onSubmit={onSubmit}>
+          <div className="panel-heading">
+            <h2>New User</h2>
+          </div>
+          <label>
+            <span>Username</span>
+            <input name="username" type="text" autoComplete="off" required />
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autoComplete="new-password" minLength="8" required />
+          </label>
+          <label className="checkbox-row">
+            <input name="is_admin" type="checkbox" />
+            <span>Admin user</span>
+          </label>
+          <label className="checkbox-row">
+            <input name="active" type="checkbox" defaultChecked />
+            <span>Active</span>
+          </label>
+          <button type="submit">Create User</button>
+        </form>
+
+        <section className="section-panel">
+          <div className="panel-heading">
+            <h2>Users</h2>
+            <button className="quiet-button" type="button" onClick={onRefresh}>
+              Refresh
+            </button>
+          </div>
+          <div className="table-wrap admin-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Last Login</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!data ? (
+                  <tr>
+                    <td className="empty-state" colSpan="5">
+                      Loading users...
+                    </td>
+                  </tr>
+                ) : users.length ? (
+                  users.map((user) => (
+                    <tr key={user.id}>
+                      <td>{user.username}</td>
+                      <td>{user.is_admin ? "Admin" : "User"}</td>
+                      <td>{user.active ? "Active" : "Disabled"}</td>
+                      <td>{formatDate(user.last_login_at)}</td>
+                      <td>{formatDate(user.created_at)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="empty-state" colSpan="5">
+                      No users yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section className="section-panel">
+        <div className="panel-heading">
+          <h2>Login Audit</h2>
+          <span>{events.length} recent events</span>
+        </div>
+        <div className="table-wrap admin-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Username</th>
+                <th>Result</th>
+                <th>IP</th>
+                <th>User Agent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!data ? (
+                <tr>
+                  <td className="empty-state" colSpan="5">
+                    Loading login audit...
+                  </td>
+                </tr>
+              ) : events.length ? (
+                events.map((event) => (
+                  <tr key={event.id}>
+                    <td>{formatDate(event.created_at)}</td>
+                    <td>{event.username}</td>
+                    <td className={event.success ? "positive" : "negative"}>{event.success ? "Success" : "Failed"}</td>
+                    <td>{event.ip_address || ""}</td>
+                    <td className="user-agent-cell" title={event.user_agent || ""}>
+                      {event.user_agent || ""}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td className="empty-state" colSpan="5">
+                    No login events yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
     </section>
   );
@@ -1389,8 +2040,8 @@ function Metrics({ metrics }) {
       {metrics.map(([label, value, tone]) => (
         <article className="metric" key={label}>
           <span>{label}</span>
-          <strong className={tone ? toneClass(value) : ""}>
-            {tone === "percentTone" ? formatPercent(value) : formatMoney(value)}
+          <strong className={tone === "raw" ? "" : tone ? toneClass(value) : ""}>
+            {tone === "percentTone" ? formatPercent(value) : tone === "raw" ? value : formatMoney(value)}
           </strong>
         </article>
       ))}
@@ -1398,33 +2049,26 @@ function Metrics({ metrics }) {
   );
 }
 
-function summaryAccountRank(account) {
-  const name = shortAccountName(account.name).toLowerCase();
-  const order = [
-    ["resp", 0],
-    ["jamie rrsp", 1],
-    ["jamie tfsa", 2],
-    ["jamie tfsac", 2],
-    ["jamie cash", 3],
-    ["michelle rrsp", 4],
-    ["michelle rsp", 4],
-    ["michelle tfsa", 5],
-    ["michelle cash", 6],
-  ];
-  const match = order.find(([label]) => name === label);
-  return match ? match[1] : 99;
-}
-
-function AccountSummaryTable({ accounts, onActivate }) {
+function AccountSummaryTable({ accounts, incomeByAccount, onActivate }) {
   if (!accounts.length) {
     return <div className="empty-state">No accounts imported.</div>;
   }
 
-  const orderedAccounts = [...accounts].sort((left, right) => {
-    const rankDiff = summaryAccountRank(left) - summaryAccountRank(right);
-    if (rankDiff) return rankDiff;
-    return shortAccountName(left.name).localeCompare(shortAccountName(right.name));
-  });
+  const orderedAccounts = sortAccountsForDisplay(accounts);
+  const totals = orderedAccounts.reduce(
+    (sum, account) => {
+      const balance = Number(account.current_total_value ?? account.total_closing_value ?? 0);
+      const dayChange = Number(account.day_change || 0);
+      sum.balance += balance;
+      sum.cash += Number(account.cash_balance || 0);
+      sum.income += Number(incomeByAccount.get(account.name) || 0);
+      sum.dayChange += dayChange;
+      return sum;
+    },
+    { balance: 0, cash: 0, income: 0, dayChange: 0 }
+  );
+  const previousBalance = totals.balance - totals.dayChange;
+  const totalDayChangePct = previousBalance ? (totals.dayChange / previousBalance) * 100 : null;
 
   return (
     <div className="table-wrap summary-account-wrap">
@@ -1433,8 +2077,8 @@ function AccountSummaryTable({ accounts, onActivate }) {
           <tr>
             <th />
             <th className="numeric">Balance</th>
-            <th className="numeric">Cap</th>
             <th className="numeric">Cash</th>
+            <th className="numeric">Income</th>
             <th className="numeric">DoD</th>
             <th className="numeric">DoD$</th>
           </tr>
@@ -1444,13 +2088,23 @@ function AccountSummaryTable({ accounts, onActivate }) {
             <tr key={account.id} onClick={() => onActivate("account", account.id)}>
               <td>{shortAccountName(account.name)}</td>
               <td className="numeric">{formatMoney(account.current_total_value ?? account.total_closing_value)}</td>
-              <td className="numeric">{formatMoney(account.total_book_value)}</td>
               <td className="numeric">{formatMoney(account.cash_balance || 0)}</td>
+              <td className="numeric">{formatMoney(incomeByAccount.get(account.name) || 0)}</td>
               <td className={`numeric ${toneClass(account.day_change_pct)}`}>{formatPercent(account.day_change_pct)}</td>
               <td className={`numeric ${toneClass(account.day_change)}`}>{formatMoney(account.day_change)}</td>
             </tr>
           ))}
         </tbody>
+        <tfoot>
+          <tr>
+            <td>Total</td>
+            <td className="numeric">{formatMoney(totals.balance)}</td>
+            <td className="numeric">{formatMoney(totals.cash)}</td>
+            <td className="numeric">{formatMoney(totals.income)}</td>
+            <td className={`numeric ${toneClass(totalDayChangePct)}`}>{formatPercent(totalDayChangePct)}</td>
+            <td className={`numeric ${toneClass(totals.dayChange)}`}>{formatMoney(totals.dayChange)}</td>
+          </tr>
+        </tfoot>
       </table>
     </div>
   );
@@ -1598,24 +2252,43 @@ function TableToolbar({ value, onChange, count, placeholder }) {
   );
 }
 
-function HoldingsTable({ holdings, sort, weightKey, showAccount, onSort }) {
+function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, onSort, onOpenStock }) {
   const headers = [
-    ["symbol", "Symbol"],
-    ["description", "Description"],
-    ["quantity", "Quantity", "numeric"],
-    ["average_cost", "Avg Cost", "numeric"],
-    ["current_price", "Current Price", "numeric"],
-    ["day_change", "Day Change", "numeric"],
-    ["current_value", "Current Value", "numeric"],
-    ["book_value", "Book", "numeric"],
-    ["current_gain_loss", "Gain", "numeric"],
-    [weightKey, weightKey === "account_weight" ? "Acct Weight" : "Weight", "numeric"],
+    ["description", "Company"],
+    ["account_weight", "Alloc", "numeric"],
+    ["symbol", "Ticker"],
+    ["fx_to_cad", "FX", "numeric"],
+    ["quantity", "Qty", "numeric"],
+    ["average_cost", "Avg", "numeric"],
+    ["current_price", "Current", "numeric"],
+    ["book_value", "Orig", "numeric"],
+    ["previous_value", "Yest", "numeric"],
+    ["current_value", "Total", "numeric"],
+    ["current_gain_loss_pct", "Gain/Loss", "numeric"],
+    ["day_change_pct", "Day", "numeric"],
+    ["day_value_change", "DoD", "numeric"],
+    ["annual_forward_income", "Income", "numeric"],
   ];
+  const totals = holdings.reduce(
+    (sum, holding) => {
+      sum.currentValue += Number((holding.current_value ?? holding.closing_value) || 0);
+      sum.dayValueChange += Number(holding.day_value_change || 0);
+      sum.annualIncome += Number(holding.annual_forward_income || 0);
+      return sum;
+    },
+    { currentValue: 0, dayValueChange: 0, annualIncome: 0 }
+  );
 
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="table-wrap account-holdings-wrap">
+      <table className="account-holdings-table">
         <thead>
+          {accountName ? (
+            <tr className="account-holdings-title-row">
+              <th>Account Name</th>
+              <th colSpan={headers.length - 1}>{shortAccountName(accountName)}</th>
+            </tr>
+          ) : null}
           <tr>
             {headers.map(([key, label, className]) => (
               <th key={key} className={className || ""} onClick={() => onSort(key)}>
@@ -1630,49 +2303,72 @@ function HoldingsTable({ holdings, sort, weightKey, showAccount, onSort }) {
             holdings.map((holding) => (
               <tr key={`${holding.id}-${holding.account_name}`}>
                 <td>
-                  <div className="symbol">{holding.symbol}</div>
-                  <div className="row-sub">
-                    {holding.currency} {holding.market}
-                  </div>
-                </td>
-                <td>
-                  <div className="description" title={holding.description}>
+                  <div className="description account-company" title={holding.description}>
                     {holding.description}
                   </div>
                   {showAccount ? <div className="row-sub">{shortAccountName(holding.account_name)}</div> : null}
                 </td>
+                <td className="numeric">{formatPercent(holding.account_weight)}</td>
+                <td>
+                  {onOpenStock && holding.symbol && String(holding.symbol).toUpperCase() !== "CASH" ? (
+                    <button className="symbol-link" type="button" onClick={() => onOpenStock(holding)}>
+                      {tickerLabel(holding)}
+                    </button>
+                  ) : (
+                    <div className="symbol">{tickerLabel(holding)}</div>
+                  )}
+                </td>
+                <td className="numeric">{formatFx(holding.fx_to_cad)}</td>
                 <td className="numeric">{number.format(holding.quantity || 0)}</td>
                 <td className="numeric">{formatMoney(holding.average_cost)}</td>
-                <td className="numeric">
-                  {formatMoney(holding.current_price ?? holding.closing_price)}
-                  <div className="row-sub">
-                    {holding.current_price_source === "yfinance" ? "Live" : "Import"}
-                    {holding.price_quote_time ? ` ${formatDate(holding.price_quote_time)}` : ""}
-                  </div>
+                <td className="numeric current-price-cell">{formatMoney(holding.current_price ?? holding.closing_price)}</td>
+                <td className="numeric">{formatWholeMoney(holding.book_value)}</td>
+                <td className="numeric">{formatWholeMoney(holding.previous_value)}</td>
+                <td className="numeric">{formatWholeMoney(holding.current_value ?? holding.closing_value)}</td>
+                <td className={`numeric ${toneClass(holding.current_gain_loss ?? holding.gain_loss)}`}>
+                  {formatPercent(holding.current_gain_loss_pct ?? holding.gain_loss_pct)}
+                </td>
+                <td className={`numeric account-day-pct ${toneClass(holding.day_change_pct)}`}>
+                  {formatPercent(holding.day_change_pct)}
                 </td>
                 <td className={`numeric ${toneClass(holding.day_value_change)}`}>
                   {holding.day_value_change === null || holding.day_value_change === undefined
                     ? ""
-                    : formatMoney(holding.day_value_change)}
-                  <div className="row-sub">{formatPercent(holding.day_change_pct)}</div>
+                    : formatWholeMoney(holding.day_value_change)}
                 </td>
-                <td className="numeric">{formatMoney(holding.current_value ?? holding.closing_value)}</td>
-                <td className="numeric">{formatMoney(holding.book_value)}</td>
-                <td className={`numeric ${toneClass(holding.current_gain_loss ?? holding.gain_loss)}`}>
-                  {formatMoney(holding.current_gain_loss ?? holding.gain_loss)}
-                  <div className="row-sub">{formatPercent(holding.current_gain_loss_pct ?? holding.gain_loss_pct)}</div>
-                </td>
-                <td className="numeric">{formatPercent(holding[weightKey])}</td>
+                <td className="numeric income-cell">{formatWholeMoney(holding.annual_forward_income)}</td>
               </tr>
             ))
           ) : (
             <tr>
-              <td className="empty-state" colSpan="10">
+              <td className="empty-state" colSpan={headers.length}>
                 No holdings match the current filter.
               </td>
             </tr>
           )}
         </tbody>
+        {holdings.length ? (
+          <tfoot>
+            <tr>
+              <td>Total</td>
+              <td />
+              <td />
+              <td />
+              <td />
+              <td />
+              <td />
+              <td />
+              <td />
+              <td className="numeric">{formatWholeMoney(totals.currentValue)}</td>
+              <td />
+              <td />
+              <td className={`numeric ${toneClass(totals.dayValueChange)}`}>
+                {formatWholeMoney(totals.dayValueChange)}
+              </td>
+              <td className="numeric income-cell">{formatWholeMoney(totals.annualIncome)}</td>
+            </tr>
+          </tfoot>
+        ) : null}
       </table>
     </div>
   );

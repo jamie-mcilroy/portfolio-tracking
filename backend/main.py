@@ -19,14 +19,22 @@ from pydantic import BaseModel
 
 from server import (
     BASE_DIR,
+    authenticate_user,
     balance_snapshot_exists,
+    create_user,
+    ensure_auth_user,
     get_accounts,
     get_balance_snapshots,
+    get_stock_detail,
     get_summary,
+    get_user_by_username,
     import_history_content,
     import_content,
     import_path,
     latest_price_status,
+    list_login_events,
+    list_users,
+    record_login_event,
     refresh_current_prices,
     save_balance_snapshot,
     save_account,
@@ -91,6 +99,13 @@ class LoginPayload(BaseModel):
     password: str
 
 
+class UserPayload(BaseModel):
+    username: str
+    password: str
+    is_admin: bool = False
+    active: bool = True
+
+
 def _base64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
@@ -131,8 +146,6 @@ def verify_session(token: str | None) -> Optional[str]:
         return None
 
     username = payload.get("sub")
-    if username != AUTH_USERNAME:
-        return None
     return username
 
 
@@ -140,6 +153,16 @@ def require_auth(request: Request) -> str:
     username = verify_session(request.cookies.get(SESSION_COOKIE))
     if not username:
         raise HTTPException(status_code=401, detail="Authentication required.")
+    user = get_user_by_username(username)
+    if not user or not user["active"]:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return username
+
+
+def require_admin(username: str = Depends(require_auth)) -> str:
+    user = get_user_by_username(username)
+    if not user or not user["is_admin"]:
+        raise HTTPException(status_code=403, detail="Admin access required.")
     return username
 
 
@@ -219,6 +242,7 @@ def price_refresh_loop():
 @app.on_event("startup")
 def start_background_workers():
     global price_refresh_thread
+    ensure_auth_user(AUTH_USERNAME, AUTH_PASSWORD, is_admin=True)
     if not PRICE_REFRESH_ENABLED or price_refresh_thread:
         return
     price_refresh_stop.clear()
@@ -236,22 +260,36 @@ def health():
     return {"ok": True}
 
 
+def request_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else ""
+
+
 @app.post("/api/login")
-def login(payload: LoginPayload, response: Response):
-    username_ok = secrets.compare_digest(payload.username, AUTH_USERNAME)
-    password_ok = secrets.compare_digest(payload.password, AUTH_PASSWORD)
-    if not username_ok or not password_ok:
+def login(payload: LoginPayload, request: Request, response: Response):
+    user = authenticate_user(payload.username, payload.password)
+    audit_user = user or get_user_by_username(payload.username)
+    record_login_event(
+        payload.username,
+        user_id=audit_user["id"] if audit_user else None,
+        success=bool(user),
+        ip_address=request_ip(request),
+        user_agent=request.headers.get("user-agent", ""),
+    )
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     response.set_cookie(
         SESSION_COOKIE,
-        create_session(payload.username),
+        create_session(user["username"]),
         max_age=SESSION_SECONDS,
         httponly=True,
         samesite="lax",
         secure=COOKIE_SECURE,
     )
-    return {"ok": True, "username": payload.username}
+    return {"ok": True, "username": user["username"], "is_admin": user["is_admin"]}
 
 
 @app.post("/api/logout")
@@ -262,7 +300,27 @@ def logout(response: Response):
 
 @app.get("/api/me")
 def me(username: str = Depends(require_auth)):
-    return {"authenticated": True, "username": username}
+    user = get_user_by_username(username)
+    return {"authenticated": True, "username": username, "is_admin": bool(user and user["is_admin"])}
+
+
+@app.get("/api/users")
+def users(username: str = Depends(require_admin)):
+    return {"users": list_users(), "login_events": list_login_events(100)}
+
+
+@app.post("/api/users")
+def add_user(payload: UserPayload, username: str = Depends(require_admin)):
+    try:
+        user = create_user(
+            payload.username,
+            payload.password,
+            is_admin=payload.is_admin,
+            active=payload.active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"user": user, "users": list_users(), "login_events": list_login_events(100)}
 
 
 @app.get("/api/summary")
@@ -288,6 +346,14 @@ def price_status(username: str = Depends(require_auth)):
 @app.post("/api/prices/refresh")
 def refresh_prices(username: str = Depends(require_auth)):
     return refresh_current_prices()
+
+
+@app.get("/api/stocks/{symbol}")
+def stock_detail(symbol: str, market: str = "", refresh: bool = False, username: str = Depends(require_auth)):
+    try:
+        return get_stock_detail(symbol, market, refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/balance-snapshots")

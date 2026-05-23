@@ -312,6 +312,10 @@ main {
   grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
 }
 
+.admin-grid {
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+}
+
 .section-panel {
   padding: 16px;
 }
@@ -417,6 +421,32 @@ main {
   margin-top: 2px;
 }
 
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.account-cash-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.account-cash-pill strong {
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .quiet-button {
   min-height: 34px;
   padding: 0 12px;
@@ -433,6 +463,11 @@ main {
   color: var(--blue);
 }
 
+.quiet-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .row-actions {
   display: flex;
   justify-content: flex-end;
@@ -447,6 +482,17 @@ main {
 .account-setup-form label {
   display: grid;
   gap: 5px;
+}
+
+.account-setup-form label.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.account-setup-form .checkbox-row input {
+  width: auto;
+  min-height: 0;
 }
 
 .cash-edit-fields {
@@ -540,6 +586,14 @@ main {
   color: #7a2a2a;
 }
 
+.price-update-footer {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 0 2px 4px;
+  text-align: right;
+}
+
 .table-toolbar {
   display: flex;
   justify-content: space-between;
@@ -561,6 +615,17 @@ main {
 
 .table-wrap {
   overflow: auto;
+}
+
+.admin-table-wrap table {
+  min-width: 780px;
+}
+
+.user-agent-cell {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 table {
@@ -604,6 +669,12 @@ table {
   background: #f4f8fa;
 }
 
+.summary-account-table tfoot td {
+  background: #f6f8f9;
+  border-top: 2px solid #4d4d4d;
+  font-weight: 800;
+}
+
 th,
 td {
   padding: 10px 12px;
@@ -640,11 +711,98 @@ tr:hover td {
   font-weight: 800;
 }
 
+.symbol-link {
+  display: inline-flex;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 0;
+  text-align: left;
+}
+
+.symbol-link:hover {
+  text-decoration: underline;
+}
+
 .description {
   max-width: 320px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.account-holdings-wrap table {
+  min-width: 1360px;
+}
+
+.account-holdings-table th,
+.account-holdings-table td {
+  padding: 4px 6px;
+  border: 1px solid #cfd5d9;
+  font-size: 13px;
+}
+
+.account-holdings-table th {
+  background: #989898;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.account-holdings-table .account-holdings-title-row th {
+  font-size: 15px;
+}
+
+.account-holdings-table .account-holdings-title-row th:first-child {
+  border-left: 2px solid #2d6cdf;
+  border-top: 2px solid #2d6cdf;
+  border-bottom: 2px solid #2d6cdf;
+}
+
+.account-holdings-table .account-holdings-title-row th:nth-child(2) {
+  text-align: left;
+}
+
+.account-holdings-table td {
+  background: #ffffff;
+  color: #000000;
+  font-size: 13px;
+}
+
+.account-holdings-table tr:hover td {
+  background: #f7faf9;
+}
+
+.account-company {
+  max-width: 360px;
+  color: #000000;
+}
+
+.account-holdings-table .current-price-cell,
+.account-holdings-table .income-cell {
+  color: #4a4a4a;
+  font-weight: 800;
+}
+
+.account-holdings-table .account-day-pct.positive {
+  background: #cfe8c6;
+  color: #25462e;
+}
+
+.account-holdings-table .account-day-pct.negative {
+  background: #f0c7c1;
+  color: #4b3a37;
+}
+
+.account-holdings-table tfoot td {
+  background: #f6f8f9;
+  border-top: 2px solid #989898;
+  color: #000000;
+  font-weight: 800;
 }
 
 .allocation-bar {
@@ -706,6 +864,16 @@ tr:hover td {
 
 .account-insights-grid {
   grid-template-columns: minmax(320px, 0.9fr) minmax(520px, 1.1fr);
+}
+
+.account-history-grid {
+  grid-template-columns: minmax(520px, 1fr) minmax(520px, 1fr);
+}
+
+.account-history-grid .account-performance {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
 }
 
 .monthly-pivot-wrap {
@@ -888,6 +1056,113 @@ tr:hover td {
   font-weight: 800;
 }
 
+.stock-detail-grid {
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+}
+
+.stock-chart-wrap {
+  display: grid;
+  min-height: 220px;
+  align-items: center;
+}
+
+.stock-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 190px;
+  cursor: crosshair;
+}
+
+.stock-chart line {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.stock-chart text {
+  fill: var(--muted);
+  font-size: 12px;
+  text-anchor: end;
+}
+
+.stock-chart polyline {
+  fill: none;
+  stroke: var(--blue);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
+.stock-dividend-chart rect {
+  fill: var(--green);
+}
+
+.stock-chart .stock-hover-line {
+  stroke: #7f878b;
+  stroke-dasharray: 3 4;
+  stroke-width: 1;
+}
+
+.stock-chart .stock-hover-dot {
+  fill: #ffffff;
+  stroke: var(--blue);
+  stroke-width: 2;
+}
+
+.stock-chart .performance-tooltip rect {
+  fill: #ffffff;
+  stroke: var(--line);
+  stroke-width: 1;
+  filter: drop-shadow(0 4px 8px rgba(24, 32, 37, 0.14));
+}
+
+.stock-chart .performance-tooltip text {
+  fill: var(--muted);
+  font-size: 12px;
+  text-anchor: start;
+}
+
+.stock-chart .performance-tooltip .tooltip-value {
+  fill: var(--text);
+  font-weight: 800;
+}
+
+.stock-dividend-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.stock-forward-note {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.stock-dividend-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stock-dividend-row:first-child {
+  border-top: 0;
+}
+
+.stock-dividend-row strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-holdings-table {
+  min-width: 640px;
+}
+
 .history-heading {
   display: flex;
   align-items: flex-start;
@@ -954,6 +1229,7 @@ tr:hover td {
   .topbar,
   .history-heading,
   .summary-grid,
+  .admin-grid,
   .setup-layout {
     display: grid;
     grid-template-columns: 1fr;
