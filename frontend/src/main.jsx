@@ -25,6 +25,21 @@ const performanceRanges = [
   ["ytd", "YTD"],
   ["max", "Max"],
 ];
+const transactionTypes = [
+  ["DIVIDEND", "Dividend"],
+  ["DRIP", "DRIP"],
+  ["BUY", "Buy"],
+  ["SELL", "Sell"],
+  ["DEPOSIT", "Deposit"],
+  ["WITHDRAWAL", "Withdrawal"],
+  ["FEE", "Fee"],
+  ["TAX", "Tax"],
+  ["INTEREST", "Interest"],
+  ["FX", "FX"],
+  ["TRANSFER_IN", "Transfer In"],
+  ["TRANSFER_OUT", "Transfer Out"],
+  ["ADJUSTMENT", "Adjustment"],
+];
 const dayMs = 24 * 60 * 60 * 1000;
 const accountDisplayOrder = [
   ["jamie rrsp", 0],
@@ -96,6 +111,14 @@ function formatMarketDate(value) {
   return new Intl.DateTimeFormat("en-CA", { dateStyle: "medium" }).format(new Date(parsed));
 }
 
+function todayInputValue() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function transactionTypeLabel(value) {
+  return transactionTypes.find(([type]) => type === value)?.[1] || String(value || "");
+}
+
 function tickerLabel(holding) {
   const symbol = String(holding?.symbol || "").trim().toUpperCase();
   const market = String(holding?.market || "").trim().toUpperCase();
@@ -110,10 +133,39 @@ function formatFx(value) {
   return Number.isInteger(fx) ? String(fx) : fx.toFixed(4);
 }
 
+function cashAmountForCurrency(account, currency) {
+  const match = (account?.cash_balances || []).find((item) => String(item.currency || "").toUpperCase() === currency);
+  return match ? Number(match.amount || 0) : 0;
+}
+
+function cashInputDefault(account, currency) {
+  if (!account?.has_import) return "";
+  const amount = cashAmountForCurrency(account, currency);
+  return amount || "";
+}
+
+function formatCashBalances(account) {
+  const balances = (account?.cash_balances || []).filter((item) => Number(item.amount || 0));
+  if (!balances.length) {
+    return formatMoney(account?.cash_balance || 0);
+  }
+  const native = balances
+    .map((item) => `${item.currency} ${formatCurrency(item.amount, item.currency)}`)
+    .join(" / ");
+  if (balances.length > 1) {
+    return `${native} (${formatMoney(account.cash_balance || 0)} CAD)`;
+  }
+  return native;
+}
+
 function shortAccountName(name) {
   return String(name || "")
     .replace(/^\d+\s+/, "")
     .replace(/\s+-\s+Combined Holdings$/i, "");
+}
+
+function accountEntity(account) {
+  return String(account?.account_entity || "Personal").toLowerCase() === "corporate" ? "Corporate" : "Personal";
 }
 
 function accountDisplayRank(account) {
@@ -124,6 +176,8 @@ function accountDisplayRank(account) {
 
 function sortAccountsForDisplay(accounts) {
   return [...accounts].sort((left, right) => {
+    const entityDiff = (accountEntity(left) === "Personal" ? 0 : 1) - (accountEntity(right) === "Personal" ? 0 : 1);
+    if (entityDiff) return entityDiff;
     const rankDiff = accountDisplayRank(left) - accountDisplayRank(right);
     if (rankDiff) return rankDiff;
     return shortAccountName(left.name).localeCompare(shortAccountName(right.name));
@@ -133,6 +187,16 @@ function sortAccountsForDisplay(accounts) {
 function isRetirementIncomeAccount(name) {
   const label = shortAccountName(name).toLowerCase();
   return ["jamie rrsp", "jamie rsp", "michelle rrsp", "michelle rsp"].includes(label);
+}
+
+function isPrivateFundAccount(account) {
+  return String(account?.account_type || "").trim().toLowerCase() === "private fund";
+}
+
+function canOpenStock(holding) {
+  const symbol = String(holding?.symbol || "").trim().toUpperCase();
+  const market = String(holding?.market || "").trim().toUpperCase();
+  return Boolean(symbol && symbol !== "CASH" && !["PRIVATE", "MANUAL", "FUND", "PRIVATE FUND"].includes(market));
 }
 
 function incomeByAccountFromHoldings(holdings) {
@@ -145,6 +209,59 @@ function incomeByAccountFromHoldings(holdings) {
     );
     return incomeByAccount;
   }, new Map());
+}
+
+function entityTotalsFromAccounts(accounts, incomeByAccount) {
+  return accounts.reduce(
+    (totals, account) => {
+      const entity = accountEntity(account);
+      const balance = Number(account.current_total_value ?? account.total_closing_value ?? 0);
+      const dayChange = Number(account.day_change || 0);
+      totals[entity].balance += balance;
+      totals[entity].cash += Number(account.cash_balance || 0);
+      totals[entity].income += Number(incomeByAccount.get(account.name) || 0);
+      totals[entity].dayChange += dayChange;
+      totals[entity].count += 1;
+      return totals;
+    },
+    {
+      Personal: { balance: 0, cash: 0, income: 0, dayChange: 0, count: 0 },
+      Corporate: { balance: 0, cash: 0, income: 0, dayChange: 0, count: 0 },
+    }
+  );
+}
+
+function deriskForHolding(holding) {
+  const quantity = Number(holding.quantity || 0);
+  const currentPrice = Number((holding.current_price ?? holding.closing_price) || 0);
+  const bookValue = Number(holding.book_value || 0);
+  const currentValue = Number((holding.current_value ?? holding.closing_value) || 0);
+
+  if (!quantity || !currentPrice || !bookValue) {
+    return { status: "n/a", possible: false };
+  }
+
+  if (currentValue < bookValue) {
+    return { status: "not_possible", possible: false };
+  }
+
+  const sharesToSell = Math.min(quantity, Math.ceil(bookValue / currentPrice));
+  const proceeds = sharesToSell * currentPrice;
+  const sharesLeft = Math.max(0, quantity - sharesToSell);
+  const valueLeft = sharesLeft * currentPrice;
+  const incomePerShare = Number(holding.annual_forward_income || 0) / quantity;
+  const incomeLost = sharesToSell * incomePerShare;
+
+  return {
+    status: "ok",
+    possible: true,
+    sharesToSell,
+    sellPct: (sharesToSell / quantity) * 100,
+    proceeds,
+    sharesLeft,
+    valueLeft,
+    incomeLost,
+  };
 }
 
 function toneClass(value) {
@@ -179,6 +296,8 @@ function App() {
   const [data, setData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
   const [usersData, setUsersData] = useState(null);
+  const [transactionsData, setTransactionsData] = useState(null);
+  const [privateFundData, setPrivateFundData] = useState({});
   const [activeView, setActiveView] = useState("summary");
   const [activeAccountId, setActiveAccountId] = useState(null);
   const [activeStock, setActiveStock] = useState(null);
@@ -196,7 +315,10 @@ function App() {
     const response = await apiFetch("/api/summary");
     const payload = await parseApiResponse(response);
     setData(payload);
-    if (activeView === "account" && !payload.accounts.some((account) => account.id === activeAccountId)) {
+    if (
+      activeView === "account" &&
+      !(payload.all_accounts || payload.accounts).some((account) => account.id === activeAccountId)
+    ) {
       setActiveView("summary");
       setActiveAccountId(null);
     }
@@ -212,6 +334,19 @@ function App() {
     const response = await apiFetch("/api/users");
     const payload = await parseApiResponse(response);
     setUsersData(payload);
+  }
+
+  async function loadTransactions() {
+    const response = await apiFetch("/api/transactions?limit=500");
+    const payload = await parseApiResponse(response);
+    setTransactionsData(payload);
+  }
+
+  async function loadPrivateFundMarks(accountId) {
+    const response = await apiFetch(`/api/accounts/${accountId}/private-fund-marks`);
+    const payload = await parseApiResponse(response);
+    setPrivateFundData((current) => ({ ...current, [accountId]: payload }));
+    return payload;
   }
 
   useEffect(() => {
@@ -262,6 +397,9 @@ function App() {
     const form = event.currentTarget;
     const button = form.querySelector("button");
     const payload = Object.fromEntries(new FormData(form).entries());
+    ["beginning_balance", "net_income", "withdrawal", "contribution", "ending_balance"].forEach((field) => {
+      payload[field] = String(payload[field] || "").trim() === "" ? 0 : Number(payload[field]);
+    });
 
     button.disabled = true;
     try {
@@ -286,6 +424,7 @@ function App() {
     setData(null);
     setHistoryData(null);
     setUsersData(null);
+    setTransactionsData(null);
     setAuth({ status: "anonymous", username: null, isAdmin: false });
   }
 
@@ -316,6 +455,27 @@ function App() {
           showMessage(error.message, true);
         }
       });
+    }
+    if (view === "transactions") {
+      loadTransactions().catch((error) => {
+        if (error instanceof AuthError) {
+          setAuth({ status: "anonymous", username: null, isAdmin: false });
+        } else {
+          showMessage(error.message, true);
+        }
+      });
+    }
+    if (view === "account" && accountId) {
+      const account = (data?.all_accounts || data?.accounts || []).find((item) => Number(item.id) === Number(accountId));
+      if (isPrivateFundAccount(account)) {
+        loadPrivateFundMarks(accountId).catch((error) => {
+          if (error instanceof AuthError) {
+            setAuth({ status: "anonymous", username: null, isAdmin: false });
+          } else {
+            showMessage(error.message, true);
+          }
+        });
+      }
     }
   }
 
@@ -348,7 +508,7 @@ function App() {
   }
 
   function openStock(holding) {
-    if (!holding?.symbol || String(holding.symbol).toUpperCase() === "CASH") {
+    if (!canOpenStock(holding)) {
       return;
     }
     const stock = {
@@ -442,6 +602,24 @@ function App() {
     }
   }
 
+  async function handleUpdateHistoryCell(marketDate, payload) {
+    try {
+      const response = await apiFetch(`/api/balance-snapshots/${marketDate}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await parseApiResponse(response);
+      setHistoryData(result);
+      showMessage("Updated saved close.");
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    }
+  }
+
   async function handleSaveAccount(event) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -449,8 +627,19 @@ function App() {
     const payload = Object.fromEntries(new FormData(form).entries());
     const accountId = payload.id;
     delete payload.id;
-    if ("cash_balance" in payload && String(payload.cash_balance).trim() === "") {
-      payload.cash_balance = "0";
+    const cashCad = String(payload.cash_cad || "").trim();
+    const cashUsd = String(payload.cash_usd || "").trim();
+    delete payload.cash_cad;
+    delete payload.cash_usd;
+    const cashBalances = [];
+    if (cashCad !== "") {
+      cashBalances.push({ currency: "CAD", amount: Number(cashCad) || 0 });
+    }
+    if (cashUsd !== "") {
+      cashBalances.push({ currency: "USD", amount: Number(cashUsd) || 0 });
+    }
+    if (cashBalances.length || accountId) {
+      payload.cash_balances = cashBalances;
     }
 
     button.disabled = true;
@@ -463,6 +652,7 @@ function App() {
       const result = await parseApiResponse(response);
       showMessage(`${accountId ? "Updated" : result.created ? "Created" : "Updated"} ${result.account.name}.`);
       form.reset();
+      form.elements.account_entity.value = "Personal";
       form.elements.base_currency.value = "CAD";
       setEditingAccount(null);
       await loadSummary();
@@ -511,7 +701,91 @@ function App() {
     }
   }
 
-  const activeAccount = data?.accounts.find((account) => account.id === activeAccountId) || null;
+  async function handleSavePrivateFundMark(accountId, event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button");
+    const payload = Object.fromEntries(new FormData(form).entries());
+
+    button.disabled = true;
+    try {
+      const response = await apiFetch(`/api/accounts/${accountId}/private-fund-marks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await parseApiResponse(response);
+      setPrivateFundData((current) => ({ ...current, [accountId]: result }));
+      form.reset();
+      form.elements.currency.value = result.summary?.currency || "USD";
+      await loadSummary();
+      showMessage("Saved private fund mark.");
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleSaveTransaction(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button");
+    const payload = Object.fromEntries(new FormData(form).entries());
+    payload.account_id = Number(payload.account_id);
+    ["quantity", "price", "dividend_per_share", "gross_amount", "fees", "tax", "net_amount"].forEach((field) => {
+      payload[field] = String(payload[field] || "").trim() === "" ? null : Number(payload[field]);
+    });
+    ["gross_amount", "fees", "tax"].forEach((field) => {
+      if (payload[field] === null) payload[field] = 0;
+    });
+
+    button.disabled = true;
+    try {
+      const response = await apiFetch("/api/transactions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await parseApiResponse(response);
+      setTransactionsData({ transactions: result.transactions || [] });
+      form.reset();
+      form.elements.transaction_date.value = todayInputValue();
+      form.elements.transaction_type.value = "DIVIDEND";
+      form.elements.currency.value = "CAD";
+      await loadSummary();
+      showMessage("Saved transaction.");
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleDeleteTransaction(transactionId) {
+    try {
+      const response = await apiFetch(`/api/transactions/${transactionId}`, { method: "DELETE" });
+      const result = await parseApiResponse(response);
+      setTransactionsData({ transactions: result.transactions || [] });
+      showMessage("Removed transaction.");
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    }
+  }
+
+  const activeAccount =
+    (data?.accounts || []).find((account) => account.id === activeAccountId) ||
+    (data?.all_accounts || []).find((account) => account.id === activeAccountId) ||
+    null;
   const latestReport = data?.accounts
     .map((account) => account.report_timestamp)
     .filter(Boolean)
@@ -552,6 +826,7 @@ function App() {
           onSubmit={handleImport}
           username={auth.username}
           onOpenAccounts={() => activateView("accounts")}
+          onOpenTransactions={() => activateView("transactions")}
           onOpenImports={() => activateView("imports")}
           onOpenHistory={() => activateView("history")}
           onOpenUsers={() => activateView("users")}
@@ -562,12 +837,7 @@ function App() {
 
       <main>
         <section className="app-panel">
-          <Tabs
-            accounts={data.accounts}
-            activeView={activeView}
-            activeAccountId={activeAccountId}
-            onActivate={activateView}
-          />
+          {activeView !== "summary" ? <Tabs activeView={activeView} onActivate={activateView} /> : null}
 
           {message && <div className={`message ${message.isError ? "error" : ""}`}>{message.text}</div>}
 
@@ -589,6 +859,9 @@ function App() {
               onSort={changeSort}
               onActivate={activateView}
               onOpenStock={openStock}
+              privateFundData={privateFundData[activeAccount.id]}
+              onLoadPrivateFundMarks={loadPrivateFundMarks}
+              onSavePrivateFundMark={(event) => handleSavePrivateFundMark(activeAccount.id, event)}
             />
           )}
 
@@ -613,6 +886,16 @@ function App() {
             />
           )}
 
+          {activeView === "transactions" && (
+            <TransactionsPage
+              data={transactionsData}
+              accounts={data.all_accounts || data.accounts || []}
+              onSubmit={handleSaveTransaction}
+              onDelete={handleDeleteTransaction}
+              onRefresh={loadTransactions}
+            />
+          )}
+
           {activeView === "imports" && <ImportsPage imports={data.imports} />}
 
           {activeView === "history" && (
@@ -622,6 +905,7 @@ function App() {
               fileLabel={historyFileLabel}
               onFileChange={(event) => setHistoryFileLabel(event.target.files[0]?.name || "Choose CSV")}
               onUpload={handleHistoryImport}
+              onUpdate={handleUpdateHistoryCell}
             />
           )}
 
@@ -664,6 +948,7 @@ function ImportForm({
   onSubmit,
   username,
   onOpenAccounts,
+  onOpenTransactions,
   onOpenImports,
   onOpenHistory,
   onOpenUsers,
@@ -707,6 +992,9 @@ function ImportForm({
             <button type="button" onClick={() => runMenuAction(onOpenAccounts)}>
               Accounts
             </button>
+            <button type="button" onClick={() => runMenuAction(onOpenTransactions)}>
+              Transactions
+            </button>
             <button type="button" onClick={() => runMenuAction(onOpenImports)}>
               Imports
             </button>
@@ -728,46 +1016,43 @@ function ImportForm({
   );
 }
 
-function Tabs({ accounts, activeView, activeAccountId, onActivate }) {
-  const orderedAccounts = sortAccountsForDisplay(accounts);
-
+function Tabs({ activeView, onActivate }) {
   return (
     <div className="tabs" role="tablist" aria-label="Portfolio pages">
       <button className={`tab ${activeView === "summary" ? "active" : ""}`} onClick={() => onActivate("summary")}>
         Summary
       </button>
-      {orderedAccounts.map((account) => (
-        <button
-          key={account.id}
-          className={`tab ${activeView === "account" && activeAccountId === account.id ? "active" : ""}`}
-          onClick={() => onActivate("account", account.id)}
-        >
-          {shortAccountName(account.name)}
-        </button>
-      ))}
     </div>
   );
 }
 
 function SummaryPage({ data, onActivate }) {
   const incomeByAccount = incomeByAccountFromHoldings(data.holdings);
+  const entityTotals = entityTotalsFromAccounts(data.accounts, incomeByAccount);
+  const hasCorporateAccounts = entityTotals.Corporate.count > 0;
   const totalIncome = Array.from(incomeByAccount.values()).reduce((sum, income) => sum + income, 0);
   const retirementIncome = data.accounts
     .filter((account) => isRetirementIncomeAccount(account.name))
     .reduce((sum, account) => sum + (incomeByAccount.get(account.name) || 0), 0);
+  const metrics = [
+    ["Current Value", data.totals.current_value ?? data.totals.closing_value],
+    ...(hasCorporateAccounts
+      ? [
+          ["Personal Value", entityTotals.Personal.balance],
+          ["Corporate Value", entityTotals.Corporate.balance],
+        ]
+      : []),
+    ["Income", totalIncome],
+    ...(hasCorporateAccounts ? [["Corporate Income", entityTotals.Corporate.income]] : []),
+    ["Retirement Income", retirementIncome],
+    ["Day Change", data.totals.day_change, "tone"],
+    ["Current Gain", data.totals.current_gain_loss ?? data.totals.gain_loss, "tone"],
+    ["Current Return", data.totals.current_gain_loss_pct ?? data.totals.gain_loss_pct, "percentTone"],
+  ];
 
   return (
     <section className="view active">
-      <Metrics
-        metrics={[
-          ["Current Value", data.totals.current_value ?? data.totals.closing_value],
-          ["Income", totalIncome],
-          ["Retirement Income", retirementIncome],
-          ["Day Change", data.totals.day_change, "tone"],
-          ["Current Gain", data.totals.current_gain_loss ?? data.totals.gain_loss, "tone"],
-          ["Current Return", data.totals.current_gain_loss_pct ?? data.totals.gain_loss_pct, "percentTone"],
-        ]}
-      />
+      <Metrics metrics={metrics} />
 
       <section className="section-panel">
         <div className="panel-heading">
@@ -1112,7 +1397,132 @@ function AccountPerformanceChart({ series, loading }) {
   );
 }
 
-function AccountPage({ account, holdings, history, query, sort, onQuery, onSort, onActivate, onOpenStock }) {
+function PrivateFundPanel({ data, account, onSubmit }) {
+  const marks = data?.marks || [];
+  const summary = data?.summary || {};
+  const currency = summary.currency || account.base_currency || "USD";
+
+  return (
+    <section className="section-panel private-fund-panel">
+      <div className="panel-heading private-fund-heading">
+        <div>
+          <h2>Private Fund Marks</h2>
+          <p>Manual capital account updates for {shortAccountName(account.name)}</p>
+        </div>
+        {summary.latest ? <span>Latest {formatMarketDate(summary.latest.mark_date)}</span> : null}
+      </div>
+
+      <Metrics
+        metrics={[
+          ["Balance", formatCurrency(summary.balance || 0, currency), "raw"],
+          ["Net Income", formatCurrency(summary.total_income || 0, currency), "raw"],
+          ["Contributions", formatCurrency(summary.total_contributions || 0, currency), "raw"],
+          ["Withdrawals", formatCurrency(summary.total_withdrawals || 0, currency), "raw"],
+          ["ROI", summary.roi_pct, "percentTone"],
+        ]}
+      />
+
+      <form className="private-fund-form" onSubmit={onSubmit}>
+        <label>
+          <span>Date</span>
+          <input name="mark_date" type="date" required />
+        </label>
+        <label>
+          <span>Beginning</span>
+          <input name="beginning_balance" type="number" step="0.01" defaultValue="0" />
+        </label>
+        <label>
+          <span>Net Income</span>
+          <input name="net_income" type="number" step="0.01" defaultValue="0" />
+        </label>
+        <label>
+          <span>Withdrawal</span>
+          <input name="withdrawal" type="number" step="0.01" defaultValue="0" />
+        </label>
+        <label>
+          <span>Contribution</span>
+          <input name="contribution" type="number" step="0.01" defaultValue="0" />
+        </label>
+        <label>
+          <span>Ending</span>
+          <input name="ending_balance" type="number" step="0.01" required />
+        </label>
+        <label>
+          <span>Currency</span>
+          <select name="currency" defaultValue={currency}>
+            <option value="USD">USD</option>
+            <option value="CAD">CAD</option>
+          </select>
+        </label>
+        <label className="private-fund-notes">
+          <span>Notes</span>
+          <input name="notes" type="text" autoComplete="off" />
+        </label>
+        <button type="submit">Save Mark</button>
+      </form>
+
+      <div className="table-wrap private-fund-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th className="numeric">Beginning</th>
+              <th className="numeric">Income</th>
+              <th className="numeric">Withdrawal</th>
+              <th className="numeric">Contribution</th>
+              <th className="numeric">Ending</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!data ? (
+              <tr>
+                <td className="empty-state" colSpan="7">
+                  Loading private fund marks...
+                </td>
+              </tr>
+            ) : marks.length ? (
+              marks.map((mark) => (
+                <tr key={mark.id}>
+                  <td>{formatMarketDate(mark.mark_date)}</td>
+                  <td className="numeric">{formatCurrency(mark.beginning_balance, mark.currency)}</td>
+                  <td className={`numeric ${toneClass(mark.net_income)}`}>{formatCurrency(mark.net_income, mark.currency)}</td>
+                  <td className="numeric">{formatCurrency(mark.withdrawal, mark.currency)}</td>
+                  <td className="numeric">{formatCurrency(mark.contribution, mark.currency)}</td>
+                  <td className="numeric">{formatCurrency(mark.ending_balance, mark.currency)}</td>
+                  <td>{mark.notes || ""}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td className="empty-state" colSpan="7">
+                  No private fund marks yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function AccountPage({
+  account,
+  holdings,
+  history,
+  query,
+  sort,
+  onQuery,
+  onSort,
+  onActivate,
+  onOpenStock,
+  privateFundData,
+  onLoadPrivateFundMarks,
+  onSavePrivateFundMark,
+}) {
+  const [showDerisk, setShowDerisk] = useState(false);
+  const isPrivateFund = isPrivateFundAccount(account);
   const accountHoldings = useMemo(
     () =>
       holdings
@@ -1139,6 +1549,12 @@ function AccountPage({ account, holdings, history, query, sort, onQuery, onSort,
     [history, account.id]
   );
 
+  useEffect(() => {
+    if (isPrivateFund && !privateFundData) {
+      onLoadPrivateFundMarks(account.id);
+    }
+  }, [account.id, isPrivateFund, privateFundData, onLoadPrivateFundMarks]);
+
   return (
     <section className="view active">
       <div className="account-header">
@@ -1149,7 +1565,7 @@ function AccountPage({ account, holdings, history, query, sort, onQuery, onSort,
         <div className="header-actions">
           <div className="account-cash-pill">
             <span>Cash</span>
-            <strong>{formatMoney(account.cash_balance || 0)}</strong>
+            <strong>{formatCashBalances(account)}</strong>
           </div>
           <button className="quiet-button" onClick={() => onActivate("summary")}>
             Summary
@@ -1157,14 +1573,28 @@ function AccountPage({ account, holdings, history, query, sort, onQuery, onSort,
         </div>
       </div>
 
+      {isPrivateFund ? (
+        <PrivateFundPanel data={privateFundData} account={account} onSubmit={onSavePrivateFundMark} />
+      ) : null}
+
       <section className="section-panel">
-        <TableToolbar value={query} onChange={onQuery} count={sortedAccountHoldings.length} placeholder="Filter account holdings" />
+        <TableToolbar value={query} onChange={onQuery} count={sortedAccountHoldings.length} placeholder="Filter account holdings">
+          <label className="toolbar-checkbox">
+            <input
+              type="checkbox"
+              checked={showDerisk}
+              onChange={(event) => setShowDerisk(event.target.checked)}
+            />
+            <span>Show de-risk</span>
+          </label>
+        </TableToolbar>
         <HoldingsTable
           holdings={sortedAccountHoldings}
           accountName={account.name}
           sort={sort}
           weightKey="account_weight"
           showAccount={false}
+          showDerisk={showDerisk}
           onSort={onSort}
           onOpenStock={onOpenStock}
         />
@@ -1541,6 +1971,10 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
 }
 
 function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCancelEdit }) {
+  const orderedAccounts = sortAccountsForDisplay(accounts);
+  const cashCadDefaultValue = cashInputDefault(editingAccount, "CAD");
+  const cashUsdDefaultValue = cashInputDefault(editingAccount, "USD");
+
   return (
     <section className="view active">
       <section className="setup-layout">
@@ -1558,12 +1992,21 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
             <input name="owner" type="text" autoComplete="off" defaultValue={editingAccount?.owner || ""} />
           </label>
           <label>
+            <span>Entity</span>
+            <select name="account_entity" defaultValue={accountEntity(editingAccount)}>
+              <option value="Personal">Personal</option>
+              <option value="Corporate">Corporate</option>
+            </select>
+          </label>
+          <label>
             <span>Account type</span>
             <select name="account_type" defaultValue={editingAccount?.account_type || "RRSP"}>
               <option value="RRSP">RRSP</option>
               <option value="RESP">RESP</option>
               <option value="TFSA">TFSA</option>
               <option value="Taxable">Taxable</option>
+              <option value="Corporate Taxable">Corporate Taxable</option>
+              <option value="Private Fund">Private Fund</option>
               <option value="Cash">Cash</option>
               <option value="Investment">Investment</option>
             </select>
@@ -1575,26 +2018,28 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
               <option value="USD">USD</option>
             </select>
           </label>
-          {editingAccount?.has_import ? (
-            <div className="cash-edit-fields">
-              <label>
-                <span>Cash balance</span>
-                <input
-                  name="cash_balance"
-                  type="number"
-                  step="0.01"
-                  defaultValue={editingAccount?.cash_balance ?? 0}
-                />
-              </label>
-              <label>
-                <span>Cash currency</span>
-                <select name="cash_currency" defaultValue={editingAccount?.cash_currency || editingAccount?.base_currency || "CAD"}>
-                  <option value="CAD">CAD</option>
-                  <option value="USD">USD</option>
-                </select>
-              </label>
-            </div>
-          ) : null}
+          <div className="cash-edit-fields">
+            <label>
+              <span>CAD cash</span>
+              <input
+                name="cash_cad"
+                type="number"
+                step="0.01"
+                placeholder="Optional"
+                defaultValue={cashCadDefaultValue}
+              />
+            </label>
+            <label>
+              <span>USD cash</span>
+              <input
+                name="cash_usd"
+                type="number"
+                step="0.01"
+                placeholder="Optional"
+                defaultValue={cashUsdDefaultValue}
+              />
+            </label>
+          </div>
           <label>
             <span>Notes</span>
             <textarea name="notes" rows="4" defaultValue={editingAccount?.notes || ""} />
@@ -1614,8 +2059,8 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
             <h2>Accounts</h2>
           </div>
           <div className="setup-account-list">
-            {accounts.length ? (
-              accounts.map((account) => (
+            {orderedAccounts.length ? (
+              orderedAccounts.map((account) => (
                 <div key={account.id} className="setup-account-row">
                   <div className="row-top">
                     <span className="row-title">{account.name}</span>
@@ -1623,13 +2068,14 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
                   </div>
                   <div className="row-top row-sub">
                     <span>{account.account_type || "Investment"}</span>
-                    <span>{account.owner || ""}</span>
+                    <span>{accountEntity(account)}</span>
                   </div>
+                  {account.owner ? <div className="row-sub">{account.owner}</div> : null}
                   <div className="row-top row-sub">
                     <span>{account.has_import ? `${formatMoney(account.total_closing_value)} latest value` : "No import yet"}</span>
                     {Number(account.cash_balance || 0) ? (
                       <span>
-                        Cash {formatMoney(account.cash_balance)} {account.cash_currency || ""}
+                        Cash {formatCashBalances(account)}
                       </span>
                     ) : (
                       <span />
@@ -1646,6 +2092,194 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
             ) : (
               <div className="empty-state">No accounts set up.</div>
             )}
+          </div>
+        </section>
+      </section>
+    </section>
+  );
+}
+
+function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
+  const orderedAccounts = sortAccountsForDisplay(accounts);
+  const transactions = data?.transactions || [];
+  const firstAccountId = orderedAccounts[0]?.id || "";
+
+  return (
+    <section className="view active">
+      <section className="summary-grid transaction-layout">
+        <form className="section-panel account-setup-form transaction-form" onSubmit={onSubmit}>
+          <div className="panel-heading">
+            <h2>New Transaction</h2>
+          </div>
+          <label>
+            <span>Account</span>
+            <select name="account_id" defaultValue={firstAccountId} required>
+              {orderedAccounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {shortAccountName(account.name)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="transaction-form-grid">
+            <label>
+              <span>Date</span>
+              <input name="transaction_date" type="date" defaultValue={todayInputValue()} required />
+            </label>
+            <label>
+              <span>Type</span>
+              <select name="transaction_type" defaultValue="DIVIDEND">
+                {transactionTypes.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="transaction-form-grid">
+            <label>
+              <span>Ticker</span>
+              <input name="symbol" type="text" autoComplete="off" />
+            </label>
+            <label>
+              <span>Market</span>
+              <select name="market" defaultValue="CDN">
+                <option value="">None</option>
+                <option value="CDN">CDN</option>
+                <option value="US">US</option>
+                <option value="TSX">TSX</option>
+                <option value="TSXV">TSXV</option>
+                <option value="MANUAL">Manual</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>Description</span>
+            <input name="description" type="text" autoComplete="off" />
+          </label>
+          <div className="transaction-form-grid">
+            <label>
+              <span>Currency</span>
+              <select name="currency" defaultValue="CAD">
+                <option value="CAD">CAD</option>
+                <option value="USD">USD</option>
+              </select>
+            </label>
+            <label>
+              <span>Qty</span>
+              <input name="quantity" type="number" step="0.0001" />
+            </label>
+          </div>
+          <div className="transaction-form-grid">
+            <label>
+              <span>Price</span>
+              <input name="price" type="number" step="0.0001" />
+            </label>
+            <label>
+              <span>Dividend/share</span>
+              <input name="dividend_per_share" type="number" step="0.0001" />
+            </label>
+          </div>
+          <div className="transaction-form-grid">
+            <label>
+              <span>Gross</span>
+              <input name="gross_amount" type="number" step="0.01" />
+            </label>
+            <label>
+              <span>Net cash</span>
+              <input name="net_amount" type="number" step="0.01" />
+            </label>
+          </div>
+          <div className="transaction-form-grid">
+            <label>
+              <span>Fees</span>
+              <input name="fees" type="number" step="0.01" />
+            </label>
+            <label>
+              <span>Tax</span>
+              <input name="tax" type="number" step="0.01" />
+            </label>
+          </div>
+          <label>
+            <span>Notes</span>
+            <textarea name="notes" rows="3" />
+          </label>
+          <button type="submit" disabled={!orderedAccounts.length}>
+            Save Transaction
+          </button>
+        </form>
+
+        <section className="section-panel">
+          <div className="panel-heading transactions-heading">
+            <h2>Transactions</h2>
+            <button className="quiet-button" type="button" onClick={onRefresh}>
+              Refresh
+            </button>
+          </div>
+          <div className="table-wrap transaction-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Account</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                  <th>Ticker</th>
+                  <th>Currency</th>
+                  <th className="numeric">Qty</th>
+                  <th className="numeric">Price</th>
+                  <th className="numeric">Gross</th>
+                  <th className="numeric">Fees</th>
+                  <th className="numeric">Tax</th>
+                  <th className="numeric">Net Cash</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {!data ? (
+                  <tr>
+                    <td className="empty-state" colSpan="13">
+                      Loading transactions...
+                    </td>
+                  </tr>
+                ) : transactions.length ? (
+                  transactions.map((transaction) => (
+                    <tr key={transaction.id}>
+                      <td>{formatMarketDate(transaction.transaction_date)}</td>
+                      <td>{shortAccountName(transaction.account_name)}</td>
+                      <td>{transactionTypeLabel(transaction.transaction_type)}</td>
+                      <td>
+                        <div className="description" title={transaction.notes || transaction.description || ""}>
+                          {transaction.description || transaction.notes || ""}
+                        </div>
+                      </td>
+                      <td>{transaction.symbol ? tickerLabel(transaction) : ""}</td>
+                      <td>{transaction.currency}</td>
+                      <td className="numeric">{transaction.quantity ? number.format(transaction.quantity) : ""}</td>
+                      <td className="numeric">{transaction.price ? formatCurrency(transaction.price, transaction.currency) : ""}</td>
+                      <td className="numeric">{formatCurrency(transaction.gross_amount, transaction.currency)}</td>
+                      <td className="numeric">{transaction.fees ? formatCurrency(transaction.fees, transaction.currency) : ""}</td>
+                      <td className="numeric">{transaction.tax ? formatCurrency(transaction.tax, transaction.currency) : ""}</td>
+                      <td className={`numeric ${toneClass(transaction.net_amount)}`}>
+                        {formatCurrency(transaction.net_amount, transaction.currency)}
+                      </td>
+                      <td className="numeric">
+                        <button className="quiet-button compact-button" type="button" onClick={() => onDelete(transaction.id)}>
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="empty-state" colSpan="13">
+                      No transactions recorded yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </section>
       </section>
@@ -1827,7 +2461,7 @@ function ImportsPage({ imports }) {
   );
 }
 
-function HistoryPage({ data, accounts, fileLabel, onFileChange, onUpload }) {
+function HistoryPage({ data, accounts, fileLabel, onFileChange, onUpload, onUpdate }) {
   const snapshots = data?.snapshots || [];
   const latest = snapshots[0];
 
@@ -1890,7 +2524,7 @@ function HistoryPage({ data, accounts, fileLabel, onFileChange, onUpload }) {
             <div className="panel-heading">
               <h2>Saved Closes</h2>
             </div>
-            <HistoryTable snapshots={snapshots} accounts={accounts} />
+            <HistoryTable snapshots={snapshots} accounts={accounts} onUpdate={onUpdate} />
           </section>
         </>
       ) : null}
@@ -1968,31 +2602,78 @@ function HistoryAccountList({ accounts, totalValue }) {
 
 function historyAccountColumns(snapshots, accounts) {
   const columns = new Map();
-  accounts.forEach((account) => {
-    columns.set(account.id, {
-      accountId: account.id,
-      accountName: account.name,
-    });
-  });
+  const currentAccounts = new Map(accounts.map((account) => [Number(account.id), account]));
   snapshots.forEach((snapshot) => {
     (snapshot.accounts || []).forEach((account) => {
-      if (!columns.has(account.account_id)) {
-        columns.set(account.account_id, {
-          accountId: account.account_id,
-          accountName: account.account_name,
-        });
-      }
+      const accountId = Number(account.account_id);
+      const currentAccount = currentAccounts.get(accountId);
+      columns.set(accountId, {
+        accountId,
+        accountName: currentAccount?.name || account.account_name,
+        account_entity: currentAccount?.account_entity || account.account_entity || "Personal",
+      });
     });
   });
-  return Array.from(columns.values()).sort((left, right) => left.accountName.localeCompare(right.accountName));
+  return sortAccountsForDisplay(
+    Array.from(columns.values()).map((account) => ({
+      id: account.accountId,
+      name: account.accountName,
+      account_entity: account.account_entity,
+    }))
+  ).map((account) => ({
+    accountId: account.id,
+    accountName: account.name,
+  }));
 }
 
-function HistoryTable({ snapshots, accounts }) {
+function EditableHistoryNumber({ value, step = "0.01", className = "", onSave }) {
+  const initial = value === null || value === undefined ? "" : Number(value).toFixed(step === "0.0001" ? 4 : 2);
+
+  function saveIfChanged(input) {
+    const raw = String(input.value || "").trim();
+    if (raw === "" && initial === "") {
+      return;
+    }
+    if (raw === "") {
+      input.value = initial;
+      return;
+    }
+    const original = initial === "" ? "" : String(Number(initial));
+    const next = raw === "" ? "" : String(Number(raw));
+    if (next === original || Number.isNaN(Number(raw))) {
+      input.value = initial;
+      return;
+    }
+    onSave(Number(raw));
+  }
+
+  return (
+    <input
+      className={`history-edit-input ${className}`}
+      type="number"
+      step={step}
+      defaultValue={initial}
+      onFocus={(event) => event.currentTarget.select()}
+      onBlur={(event) => saveIfChanged(event.currentTarget)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.currentTarget.blur();
+        }
+        if (event.key === "Escape") {
+          event.currentTarget.value = initial;
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
+function HistoryTable({ snapshots, accounts, onUpdate }) {
   const accountColumns = historyAccountColumns(snapshots, accounts);
 
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="table-wrap history-table-wrap">
+      <table className="history-table">
         <thead>
           <tr>
             <th>Date</th>
@@ -2014,14 +2695,35 @@ function HistoryTable({ snapshots, accounts }) {
                 <td>{formatMarketDate(snapshot.market_date)}</td>
                 {accountColumns.map((account) => (
                   <td key={`${snapshot.market_date}-${account.accountId}`} className="numeric">
-                    {valuesByAccount.has(account.accountId) ? formatMoney(valuesByAccount.get(account.accountId)) : ""}
+                    <EditableHistoryNumber
+                      value={valuesByAccount.has(account.accountId) ? valuesByAccount.get(account.accountId) : ""}
+                      onSave={(value) =>
+                        onUpdate(snapshot.market_date, {
+                          account_values: [{ account_id: account.accountId, value }],
+                        })
+                      }
+                    />
                   </td>
                 ))}
-                <td className="numeric">{formatMoney(snapshot.total_value)}</td>
+                <td className="numeric">
+                  <EditableHistoryNumber
+                    value={snapshot.total_value}
+                    onSave={(value) => onUpdate(snapshot.market_date, { total_value: value })}
+                  />
+                </td>
                 <td className={`numeric ${toneClass(snapshot.day_change)}`}>
-                  {snapshot.day_change === null || snapshot.day_change === undefined ? "" : formatMoney(snapshot.day_change)}
+                  <EditableHistoryNumber
+                    value={snapshot.day_change}
+                    className={toneClass(snapshot.day_change)}
+                    onSave={(value) => onUpdate(snapshot.market_date, { day_change: value })}
+                  />
                   <div className="row-sub">
-                    {snapshot.day_change_pct === null || snapshot.day_change_pct === undefined ? "" : formatPercent(snapshot.day_change_pct)}
+                    <EditableHistoryNumber
+                      value={snapshot.day_change_pct}
+                      step="0.0001"
+                      className={toneClass(snapshot.day_change_pct)}
+                      onSave={(value) => onUpdate(snapshot.market_date, { day_change_pct: value })}
+                    />
                   </div>
                 </td>
                 <td>{formatDate(snapshot.updated_at)}</td>
@@ -2055,6 +2757,14 @@ function AccountSummaryTable({ accounts, incomeByAccount, onActivate }) {
   }
 
   const orderedAccounts = sortAccountsForDisplay(accounts);
+  const entityTotals = entityTotalsFromAccounts(orderedAccounts, incomeByAccount);
+  const accountGroups = ["Personal", "Corporate"]
+    .map((entity) => ({
+      entity,
+      accounts: orderedAccounts.filter((account) => accountEntity(account) === entity),
+      totals: entityTotals[entity],
+    }))
+    .filter((group) => group.accounts.length);
   const totals = orderedAccounts.reduce(
     (sum, account) => {
       const balance = Number(account.current_total_value ?? account.total_closing_value ?? 0);
@@ -2084,16 +2794,32 @@ function AccountSummaryTable({ accounts, incomeByAccount, onActivate }) {
           </tr>
         </thead>
         <tbody>
-          {orderedAccounts.map((account) => (
-            <tr key={account.id} onClick={() => onActivate("account", account.id)}>
-              <td>{shortAccountName(account.name)}</td>
-              <td className="numeric">{formatMoney(account.current_total_value ?? account.total_closing_value)}</td>
-              <td className="numeric">{formatMoney(account.cash_balance || 0)}</td>
-              <td className="numeric">{formatMoney(incomeByAccount.get(account.name) || 0)}</td>
-              <td className={`numeric ${toneClass(account.day_change_pct)}`}>{formatPercent(account.day_change_pct)}</td>
-              <td className={`numeric ${toneClass(account.day_change)}`}>{formatMoney(account.day_change)}</td>
-            </tr>
-          ))}
+          {accountGroups.map((group) => {
+            const previousBalance = group.totals.balance - group.totals.dayChange;
+            const dayChangePct = previousBalance ? (group.totals.dayChange / previousBalance) * 100 : null;
+            return (
+              <React.Fragment key={group.entity}>
+                <tr className="summary-account-group-row">
+                  <td>{group.entity}</td>
+                  <td className="numeric">{formatMoney(group.totals.balance)}</td>
+                  <td className="numeric">{formatMoney(group.totals.cash)}</td>
+                  <td className="numeric">{formatMoney(group.totals.income)}</td>
+                  <td className={`numeric ${toneClass(dayChangePct)}`}>{formatPercent(dayChangePct)}</td>
+                  <td className={`numeric ${toneClass(group.totals.dayChange)}`}>{formatMoney(group.totals.dayChange)}</td>
+                </tr>
+                {group.accounts.map((account) => (
+                  <tr key={account.id} onClick={() => onActivate("account", account.id)}>
+                    <td>{shortAccountName(account.name)}</td>
+                    <td className="numeric">{formatMoney(account.current_total_value ?? account.total_closing_value)}</td>
+                    <td className="numeric">{formatMoney(account.cash_balance || 0)}</td>
+                    <td className="numeric">{formatMoney(incomeByAccount.get(account.name) || 0)}</td>
+                    <td className={`numeric ${toneClass(account.day_change_pct)}`}>{formatPercent(account.day_change_pct)}</td>
+                    <td className={`numeric ${toneClass(account.day_change)}`}>{formatMoney(account.day_change)}</td>
+                  </tr>
+                ))}
+              </React.Fragment>
+            );
+          })}
         </tbody>
         <tfoot>
           <tr>
@@ -2243,17 +2969,20 @@ function CombinedAllocation({ allocation }) {
   );
 }
 
-function TableToolbar({ value, onChange, count, placeholder }) {
+function TableToolbar({ value, onChange, count, placeholder, children }) {
   return (
     <div className="table-toolbar">
       <input type="search" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
-      <span>{count} holdings</span>
+      <div className="table-toolbar-meta">
+        {children}
+        <span>{count} holdings</span>
+      </div>
     </div>
   );
 }
 
-function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, onSort, onOpenStock }) {
-  const headers = [
+function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, showDerisk, onSort, onOpenStock }) {
+  const baseHeaders = [
     ["description", "Company"],
     ["account_weight", "Alloc", "numeric"],
     ["symbol", "Ticker"],
@@ -2269,19 +2998,34 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, on
     ["day_value_change", "DoD", "numeric"],
     ["annual_forward_income", "Income", "numeric"],
   ];
+  const deriskHeaders = [
+    ["derisk_shares", "De-risk", "numeric derisk-column", false],
+    ["derisk_sell_pct", "Sell %", "numeric derisk-column", false],
+    ["derisk_recover", "Recover", "numeric derisk-column", false],
+    ["derisk_left_shares", "Left", "numeric derisk-column", false],
+    ["derisk_left_value", "Left $", "numeric derisk-column", false],
+    ["derisk_income_lost", "Income Lost", "numeric derisk-column", false],
+  ];
+  const headers = showDerisk ? [...baseHeaders, ...deriskHeaders] : baseHeaders;
   const totals = holdings.reduce(
     (sum, holding) => {
+      const derisk = deriskForHolding(holding);
       sum.currentValue += Number((holding.current_value ?? holding.closing_value) || 0);
       sum.dayValueChange += Number(holding.day_value_change || 0);
       sum.annualIncome += Number(holding.annual_forward_income || 0);
+      if (derisk.possible) {
+        sum.deriskRecover += derisk.proceeds;
+        sum.deriskValueLeft += derisk.valueLeft;
+        sum.deriskIncomeLost += derisk.incomeLost;
+      }
       return sum;
     },
-    { currentValue: 0, dayValueChange: 0, annualIncome: 0 }
+    { currentValue: 0, dayValueChange: 0, annualIncome: 0, deriskRecover: 0, deriskValueLeft: 0, deriskIncomeLost: 0 }
   );
 
   return (
     <div className="table-wrap account-holdings-wrap">
-      <table className="account-holdings-table">
+      <table className={`account-holdings-table ${showDerisk ? "show-derisk" : ""}`}>
         <thead>
           {accountName ? (
             <tr className="account-holdings-title-row">
@@ -2290,55 +3034,85 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, on
             </tr>
           ) : null}
           <tr>
-            {headers.map(([key, label, className]) => (
-              <th key={key} className={className || ""} onClick={() => onSort(key)}>
+            {headers.map(([key, label, className, sortable = true]) => (
+              <th
+                key={key}
+                className={`${className || ""}${sortable ? " sortable-header" : ""}`}
+                onClick={sortable ? () => onSort(key) : undefined}
+              >
                 {label}
-                {sort.key === key ? (sort.direction === "asc" ? " ^" : " v") : ""}
+                {sortable && sort.key === key ? (sort.direction === "asc" ? " ^" : " v") : ""}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
           {holdings.length ? (
-            holdings.map((holding) => (
-              <tr key={`${holding.id}-${holding.account_name}`}>
-                <td>
-                  <div className="description account-company" title={holding.description}>
-                    {holding.description}
-                  </div>
-                  {showAccount ? <div className="row-sub">{shortAccountName(holding.account_name)}</div> : null}
-                </td>
-                <td className="numeric">{formatPercent(holding.account_weight)}</td>
-                <td>
-                  {onOpenStock && holding.symbol && String(holding.symbol).toUpperCase() !== "CASH" ? (
-                    <button className="symbol-link" type="button" onClick={() => onOpenStock(holding)}>
-                      {tickerLabel(holding)}
-                    </button>
-                  ) : (
-                    <div className="symbol">{tickerLabel(holding)}</div>
-                  )}
-                </td>
-                <td className="numeric">{formatFx(holding.fx_to_cad)}</td>
-                <td className="numeric">{number.format(holding.quantity || 0)}</td>
-                <td className="numeric">{formatMoney(holding.average_cost)}</td>
-                <td className="numeric current-price-cell">{formatMoney(holding.current_price ?? holding.closing_price)}</td>
-                <td className="numeric">{formatWholeMoney(holding.book_value)}</td>
-                <td className="numeric">{formatWholeMoney(holding.previous_value)}</td>
-                <td className="numeric">{formatWholeMoney(holding.current_value ?? holding.closing_value)}</td>
-                <td className={`numeric ${toneClass(holding.current_gain_loss ?? holding.gain_loss)}`}>
-                  {formatPercent(holding.current_gain_loss_pct ?? holding.gain_loss_pct)}
-                </td>
-                <td className={`numeric account-day-pct ${toneClass(holding.day_change_pct)}`}>
-                  {formatPercent(holding.day_change_pct)}
-                </td>
-                <td className={`numeric ${toneClass(holding.day_value_change)}`}>
-                  {holding.day_value_change === null || holding.day_value_change === undefined
-                    ? ""
-                    : formatWholeMoney(holding.day_value_change)}
-                </td>
-                <td className="numeric income-cell">{formatWholeMoney(holding.annual_forward_income)}</td>
-              </tr>
-            ))
+            holdings.map((holding) => {
+              const derisk = deriskForHolding(holding);
+              return (
+                <tr key={`${holding.id}-${holding.account_name}`}>
+                  <td>
+                    <div className="description account-company" title={holding.description}>
+                      {holding.description}
+                    </div>
+                    {showAccount ? <div className="row-sub">{shortAccountName(holding.account_name)}</div> : null}
+                  </td>
+                  <td className="numeric">{formatPercent(holding.account_weight)}</td>
+                  <td>
+                    {onOpenStock && canOpenStock(holding) ? (
+                      <button className="symbol-link" type="button" onClick={() => onOpenStock(holding)}>
+                        {tickerLabel(holding)}
+                      </button>
+                    ) : (
+                      <div className="symbol">{tickerLabel(holding)}</div>
+                    )}
+                  </td>
+                  <td className="numeric">{formatFx(holding.fx_to_cad)}</td>
+                  <td className="numeric">{number.format(holding.quantity || 0)}</td>
+                  <td className="numeric">{formatMoney(holding.average_cost)}</td>
+                  <td className="numeric current-price-cell">{formatMoney(holding.current_price ?? holding.closing_price)}</td>
+                  <td className="numeric">{formatWholeMoney(holding.book_value)}</td>
+                  <td className="numeric">{formatWholeMoney(holding.previous_value)}</td>
+                  <td className="numeric">{formatWholeMoney(holding.current_value ?? holding.closing_value)}</td>
+                  <td className={`numeric ${toneClass(holding.current_gain_loss ?? holding.gain_loss)}`}>
+                    {formatPercent(holding.current_gain_loss_pct ?? holding.gain_loss_pct)}
+                  </td>
+                  <td className={`numeric account-day-pct ${toneClass(holding.day_change_pct)}`}>
+                    {formatPercent(holding.day_change_pct)}
+                  </td>
+                  <td className={`numeric ${toneClass(holding.day_value_change)}`}>
+                    {holding.day_value_change === null || holding.day_value_change === undefined
+                      ? ""
+                      : formatWholeMoney(holding.day_value_change)}
+                  </td>
+                  <td className="numeric income-cell">{formatWholeMoney(holding.annual_forward_income)}</td>
+                  {showDerisk ? (
+                    derisk.possible ? (
+                      <>
+                        <td className="numeric derisk-column">{number.format(derisk.sharesToSell)}</td>
+                        <td className="numeric derisk-column">{formatPercent(derisk.sellPct)}</td>
+                        <td className="numeric derisk-column">{formatWholeMoney(derisk.proceeds)}</td>
+                        <td className="numeric derisk-column">{number.format(derisk.sharesLeft)}</td>
+                        <td className="numeric derisk-column">{formatWholeMoney(derisk.valueLeft)}</td>
+                        <td className="numeric derisk-column">{formatWholeMoney(derisk.incomeLost)}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="numeric derisk-column derisk-na">
+                          {derisk.status === "not_possible" ? "Not possible" : "n/a"}
+                        </td>
+                        <td className="numeric derisk-column" />
+                        <td className="numeric derisk-column" />
+                        <td className="numeric derisk-column" />
+                        <td className="numeric derisk-column" />
+                        <td className="numeric derisk-column" />
+                      </>
+                    )
+                  ) : null}
+                </tr>
+              );
+            })
           ) : (
             <tr>
               <td className="empty-state" colSpan={headers.length}>
@@ -2366,6 +3140,16 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, on
                 {formatWholeMoney(totals.dayValueChange)}
               </td>
               <td className="numeric income-cell">{formatWholeMoney(totals.annualIncome)}</td>
+              {showDerisk ? (
+                <>
+                  <td />
+                  <td />
+                  <td className="numeric derisk-column">{formatWholeMoney(totals.deriskRecover)}</td>
+                  <td />
+                  <td className="numeric derisk-column">{formatWholeMoney(totals.deriskValueLeft)}</td>
+                  <td className="numeric derisk-column">{formatWholeMoney(totals.deriskIncomeLost)}</td>
+                </>
+              ) : null}
             </tr>
           </tfoot>
         ) : null}

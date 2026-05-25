@@ -22,24 +22,31 @@ from server import (
     authenticate_user,
     balance_snapshot_exists,
     create_user,
+    delete_transaction,
     ensure_auth_user,
     get_accounts,
     get_balance_snapshots,
     get_stock_detail,
     get_summary,
     get_user_by_username,
+    get_private_fund_marks,
     import_history_content,
     import_content,
     import_path,
     latest_price_status,
     list_login_events,
+    list_transactions,
     list_users,
     record_login_event,
     refresh_current_prices,
     save_balance_snapshot,
     save_account,
+    save_private_fund_mark,
+    save_transaction,
     update_account,
+    update_balance_snapshot_values,
     update_latest_cash_balance,
+    update_latest_cash_balances,
 )
 
 
@@ -77,14 +84,21 @@ app.add_middleware(
 )
 
 
+class CashBalancePayload(BaseModel):
+    currency: str = "CAD"
+    amount: float = 0
+
+
 class AccountPayload(BaseModel):
     name: str
     owner: str = ""
+    account_entity: str = "Personal"
     account_type: str = "Investment"
     base_currency: str = "CAD"
     notes: str = ""
     cash_balance: Optional[float] = None
     cash_currency: str = "CAD"
+    cash_balances: Optional[list[CashBalancePayload]] = None
 
 
 class ImportPathPayload(BaseModel):
@@ -104,6 +118,51 @@ class UserPayload(BaseModel):
     password: str
     is_admin: bool = False
     active: bool = True
+
+
+class PrivateFundMarkPayload(BaseModel):
+    mark_date: str
+    beginning_balance: float = 0
+    net_income: float = 0
+    withdrawal: float = 0
+    contribution: float = 0
+    ending_balance: float = 0
+    currency: str = "USD"
+    notes: str = ""
+
+
+class TransactionPayload(BaseModel):
+    account_id: int
+    transaction_date: str
+    transaction_type: str
+    symbol: str = ""
+    market: str = ""
+    description: str = ""
+    currency: str = "CAD"
+    quantity: Optional[float] = None
+    price: Optional[float] = None
+    dividend_per_share: Optional[float] = None
+    gross_amount: float = 0
+    fees: float = 0
+    tax: float = 0
+    net_amount: Optional[float] = None
+    notes: str = ""
+
+
+class AccountHistoryValuePayload(BaseModel):
+    account_id: int
+    value: float
+
+
+class BalanceSnapshotUpdatePayload(BaseModel):
+    total_value: Optional[float] = None
+    imported_value: Optional[float] = None
+    book_value: Optional[float] = None
+    gain_loss: Optional[float] = None
+    gain_loss_pct: Optional[float] = None
+    day_change: Optional[float] = None
+    day_change_pct: Optional[float] = None
+    account_values: Optional[list[AccountHistoryValuePayload]] = None
 
 
 def _base64url_encode(value: bytes) -> str:
@@ -335,6 +394,69 @@ def accounts(username: str = Depends(require_auth)):
     return {"accounts": get_accounts()}
 
 
+@app.get("/api/transactions")
+def transactions(account_id: Optional[int] = None, limit: int = 250, username: str = Depends(require_auth)):
+    return list_transactions(account_id, limit)
+
+
+@app.post("/api/transactions")
+def add_transaction(payload: TransactionPayload, username: str = Depends(require_auth)):
+    try:
+        return save_transaction(
+            payload.account_id,
+            payload.transaction_date,
+            payload.transaction_type,
+            payload.symbol,
+            payload.market,
+            payload.description,
+            payload.currency,
+            payload.quantity,
+            payload.price,
+            payload.dividend_per_share,
+            payload.gross_amount,
+            payload.fees,
+            payload.tax,
+            payload.net_amount,
+            payload.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/transactions/{transaction_id}")
+def remove_transaction(transaction_id: int, username: str = Depends(require_auth)):
+    try:
+        return delete_transaction(transaction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/accounts/{account_id}/private-fund-marks")
+def private_fund_marks(account_id: int, username: str = Depends(require_auth)):
+    try:
+        return get_private_fund_marks(account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/accounts/{account_id}/private-fund-marks")
+def add_private_fund_mark(account_id: int, payload: PrivateFundMarkPayload, username: str = Depends(require_auth)):
+    try:
+        return save_private_fund_mark(
+            account_id,
+            payload.mark_date,
+            payload.beginning_balance,
+            payload.net_income,
+            payload.withdrawal,
+            payload.contribution,
+            payload.ending_balance,
+            payload.currency,
+            payload.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/prices/status")
 def price_status(username: str = Depends(require_auth)):
     return {
@@ -369,6 +491,21 @@ def save_snapshot_for_date(market_date: str, username: str = Depends(require_aut
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.patch("/api/balance-snapshots/{market_date}")
+def edit_snapshot_for_date(
+    market_date: str,
+    payload: BalanceSnapshotUpdatePayload,
+    username: str = Depends(require_auth),
+):
+    try:
+        return update_balance_snapshot_values(
+            market_date,
+            payload.dict(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/accounts")
 def create_or_update_account(payload: AccountPayload, username: str = Depends(require_auth)):
     try:
@@ -378,7 +515,20 @@ def create_or_update_account(payload: AccountPayload, username: str = Depends(re
             payload.account_type,
             payload.base_currency,
             payload.notes,
+            payload.account_entity,
         )
+        field_set = getattr(payload, "model_fields_set", getattr(payload, "__fields_set__", set()))
+        if "cash_balances" in field_set and payload.cash_balances is not None:
+            result["cash"] = update_latest_cash_balances(
+                result["account"]["id"],
+                [item.dict() for item in payload.cash_balances],
+            )
+        elif "cash_balance" in field_set and payload.cash_balance is not None:
+            result["cash"] = update_latest_cash_balance(
+                result["account"]["id"],
+                payload.cash_balance,
+                payload.cash_currency,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -395,9 +545,15 @@ def edit_account(account_id: int, payload: AccountPayload, username: str = Depen
             payload.account_type,
             payload.base_currency,
             payload.notes,
+            payload.account_entity,
         )
         field_set = getattr(payload, "model_fields_set", getattr(payload, "__fields_set__", set()))
-        if "cash_balance" in field_set:
+        if "cash_balances" in field_set and payload.cash_balances is not None:
+            result["cash"] = update_latest_cash_balances(
+                account_id,
+                [item.dict() for item in payload.cash_balances],
+            )
+        elif "cash_balance" in field_set:
             result["cash"] = update_latest_cash_balance(
                 account_id,
                 payload.cash_balance,

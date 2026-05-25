@@ -316,6 +316,10 @@ main {
   grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
 }
 
+.transaction-layout {
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+}
+
 .section-panel {
   padding: 16px;
 }
@@ -497,7 +501,13 @@ main {
 
 .cash-edit-fields {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.transaction-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -526,6 +536,87 @@ main {
 .form-actions {
   display: flex;
   gap: 8px;
+}
+
+.private-fund-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.private-fund-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.private-fund-heading p,
+.private-fund-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.private-fund-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.private-fund-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.private-fund-form label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.private-fund-form input,
+.private-fund-form select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 7px 9px;
+}
+
+.private-fund-notes {
+  grid-column: span 2;
+}
+
+.private-fund-form button {
+  align-self: end;
+  min-height: 36px;
+  border: 1px solid var(--blue);
+  border-radius: 6px;
+  background: var(--blue);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.private-fund-form button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.private-fund-table-wrap table {
+  min-width: 900px;
+}
+
+.compact-button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
 }
 
 .account-setup-form button {
@@ -608,9 +699,33 @@ main {
   width: min(360px, 100%);
 }
 
-.table-toolbar span {
+.table-toolbar-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.table-toolbar span,
+.table-toolbar-meta span {
   color: var(--muted);
   white-space: nowrap;
+}
+
+.toolbar-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.toolbar-checkbox input {
+  width: auto;
 }
 
 .table-wrap {
@@ -619,6 +734,17 @@ main {
 
 .admin-table-wrap table {
   min-width: 780px;
+}
+
+.transaction-table-wrap table {
+  min-width: 1240px;
+}
+
+.transactions-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .user-agent-cell {
@@ -667,6 +793,18 @@ table {
 
 .summary-account-table tbody tr:hover td {
   background: #f4f8fa;
+}
+
+.summary-account-table .summary-account-group-row td {
+  background: #edf2f5;
+  border-top: 2px solid #c7d1d7;
+  color: var(--text);
+  cursor: default;
+  font-weight: 800;
+}
+
+.summary-account-table .summary-account-group-row:hover td {
+  background: #edf2f5;
 }
 
 .summary-account-table tfoot td {
@@ -738,6 +876,10 @@ tr:hover td {
   min-width: 1360px;
 }
 
+.account-holdings-wrap table.show-derisk {
+  min-width: 1800px;
+}
+
 .account-holdings-table th,
 .account-holdings-table td {
   padding: 4px 6px;
@@ -748,9 +890,27 @@ tr:hover td {
 .account-holdings-table th {
   background: #989898;
   color: #ffffff;
-  cursor: pointer;
   font-size: 14px;
   font-weight: 800;
+}
+
+.account-holdings-table th.sortable-header {
+  cursor: pointer;
+}
+
+.account-holdings-table .derisk-column {
+  background: #f4f8fa;
+}
+
+.account-holdings-table th.derisk-column {
+  background: #7f878b;
+  cursor: default;
+}
+
+.account-holdings-table .derisk-na {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .account-holdings-table .account-holdings-title-row th {
@@ -1187,6 +1347,38 @@ tr:hover td {
   white-space: nowrap;
 }
 
+.history-table-wrap table {
+  min-width: 1180px;
+}
+
+.history-edit-input {
+  width: 128px;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 6px;
+  text-align: right;
+}
+
+.history-edit-input:hover,
+.history-edit-input:focus {
+  border-color: var(--line);
+  background: #ffffff;
+  outline: none;
+}
+
+.history-edit-input.positive {
+  color: var(--green);
+}
+
+.history-edit-input.negative {
+  color: var(--red);
+}
+
 .history-chart-wrap {
   display: grid;
   min-height: 220px;
@@ -1230,6 +1422,7 @@ tr:hover td {
   .history-heading,
   .summary-grid,
   .admin-grid,
+  .transaction-layout,
   .setup-layout {
     display: grid;
     grid-template-columns: 1fr;
@@ -1237,6 +1430,10 @@ tr:hover td {
 
   .upload-form {
     grid-template-columns: 1fr;
+  }
+
+  .private-fund-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .history-upload-form {
@@ -1273,6 +1470,18 @@ tr:hover td {
   .table-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .private-fund-form {
+    grid-template-columns: 1fr;
+  }
+
+  .private-fund-notes {
+    grid-column: auto;
+  }
+
+  .transaction-form-grid {
+    grid-template-columns: 1fr;
   }
 
   .history-upload-form {
