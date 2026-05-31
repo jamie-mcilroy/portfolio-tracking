@@ -41,6 +41,10 @@ const transactionTypes = [
   ["ADJUSTMENT", "Adjustment"],
 ];
 const dayMs = 24 * 60 * 60 * 1000;
+const dividendIncomeForecastDates = [
+  ["2032", "2032-12-02"],
+  ["2037", "2037-12-02"],
+];
 const accountDisplayOrder = [
   ["jamie rrsp", 0],
   ["michelle rrsp", 1],
@@ -115,6 +119,51 @@ function todayInputValue() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function dateOnlyTime(value) {
+  if (!value) return null;
+  const dateText = String(value).slice(0, 10);
+  const parsed = Date.parse(`${dateText}T00:00:00`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function yearsBetweenDates(startDate, endDate) {
+  const start = dateOnlyTime(startDate);
+  const end = dateOnlyTime(endDate);
+  if (start === null || end === null || end <= start) return null;
+  return (end - start) / dayMs / 365.25;
+}
+
+function forecastDividendIncome(annualIncome, annualGrowthPct, startDate, targetDate) {
+  const income = Number(annualIncome || 0);
+  if (!Number.isFinite(income)) return null;
+  if (income === 0) return 0;
+
+  const growth = Number(annualGrowthPct);
+  if (!Number.isFinite(growth) || growth <= -100) return null;
+
+  const years = yearsBetweenDates(startDate, targetDate);
+  if (years === null) return null;
+
+  return income * (1 + growth / 100) ** years;
+}
+
+function forecastIncomeField(label) {
+  return `forecast_income_${label}`;
+}
+
+function forecastHoldingDividendIncome(holding, targetDate) {
+  return forecastDividendIncome(
+    holding?.annual_forward_income,
+    holding?.five_year_dividend_growth_pct,
+    holding?.current_price_fetched_at || holding?.imported_at || todayInputValue(),
+    targetDate,
+  );
+}
+
+function formatForecastIncome(value) {
+  return value === null || value === undefined || Number.isNaN(Number(value)) ? "n/a" : formatWholeMoney(value);
+}
+
 function transactionTypeLabel(value) {
   return transactionTypes.find(([type]) => type === value)?.[1] || String(value || "");
 }
@@ -184,11 +233,6 @@ function sortAccountsForDisplay(accounts) {
   });
 }
 
-function isRetirementIncomeAccount(name) {
-  const label = shortAccountName(name).toLowerCase();
-  return ["jamie rrsp", "jamie rsp", "michelle rrsp", "michelle rsp"].includes(label);
-}
-
 function isPrivateFundAccount(account) {
   return String(account?.account_type || "").trim().toLowerCase() === "private fund";
 }
@@ -197,6 +241,11 @@ function canOpenStock(holding) {
   const symbol = String(holding?.symbol || "").trim().toUpperCase();
   const market = String(holding?.market || "").trim().toUpperCase();
   return Boolean(symbol && symbol !== "CASH" && !["PRIVATE", "MANUAL", "FUND", "PRIVATE FUND"].includes(market));
+}
+
+function canTradeHolding(holding) {
+  const assetType = String(holding?.asset_type || "").trim().toLowerCase();
+  return canOpenStock(holding) && assetType !== "private fund";
 }
 
 function incomeByAccountFromHoldings(holdings) {
@@ -310,6 +359,8 @@ function App() {
   const [fileLabel, setFileLabel] = useState("Choose CSV");
   const [historyFileLabel, setHistoryFileLabel] = useState("Choose CSV");
   const [editingAccount, setEditingAccount] = useState(null);
+  const [tradeDraft, setTradeDraft] = useState(null);
+  const [cashDraft, setCashDraft] = useState(null);
 
   async function loadSummary() {
     const response = await apiFetch("/api/summary");
@@ -782,6 +833,88 @@ function App() {
     }
   }
 
+  async function handleSaveTrade(account, holding, event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    const formData = new FormData(form);
+    const payload = {
+      transaction_date: formData.get("transaction_date"),
+      shares: Number(formData.get("shares") || 0),
+      price: Number(formData.get("price") || 0),
+      drip: formData.get("drip") === "on",
+      holding_id: String(holding.id || ""),
+      manual_holding_id: holding.manual_holding_id || null,
+      symbol: holding.symbol || "",
+      market: holding.market || "",
+      description: holding.description || "",
+    };
+
+    button.disabled = true;
+    try {
+      const response = await apiFetch(`/api/accounts/${account.id}/trades`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await parseApiResponse(response);
+      await loadSummary();
+      if (transactionsData) {
+        await loadTransactions();
+      }
+      showMessage(result.message || "Saved trade.");
+      setTradeDraft(null);
+      return true;
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+      return false;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleSaveCash(account, event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    const formData = new FormData(form);
+    const cashCad = String(formData.get("cash_cad") || "").trim();
+    const cashUsd = String(formData.get("cash_usd") || "").trim();
+    const cashBalances = [];
+    if (cashCad !== "") {
+      cashBalances.push({ currency: "CAD", amount: Number(cashCad) || 0 });
+    }
+    if (cashUsd !== "") {
+      cashBalances.push({ currency: "USD", amount: Number(cashUsd) || 0 });
+    }
+
+    button.disabled = true;
+    try {
+      await parseApiResponse(
+        await apiFetch(`/api/accounts/${account.id}/cash`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cash_balances: cashBalances }),
+        })
+      );
+      await loadSummary();
+      showMessage("Updated cash balance.");
+      setCashDraft(null);
+      return true;
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+      return false;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   const activeAccount =
     (data?.accounts || []).find((account) => account.id === activeAccountId) ||
     (data?.all_accounts || []).find((account) => account.id === activeAccountId) ||
@@ -816,15 +949,12 @@ function App() {
     <>
       <header className="topbar">
         <div>
-          <h1>Portfolio Tracker</h1>
+          <h1>Investments</h1>
           <p>{latestReport ? `Latest holdings: ${latestReport}` : "Local holdings snapshots"}</p>
         </div>
-        <ImportForm
-          accounts={data.all_accounts || data.accounts}
-          fileLabel={fileLabel}
-          onFileChange={(event) => setFileLabel(event.target.files[0]?.name || "Choose CSV")}
-          onSubmit={handleImport}
+        <SessionMenu
           username={auth.username}
+          onOpenHoldingsImport={() => activateView("import-holdings")}
           onOpenAccounts={() => activateView("accounts")}
           onOpenTransactions={() => activateView("transactions")}
           onOpenImports={() => activateView("imports")}
@@ -837,7 +967,7 @@ function App() {
 
       <main>
         <section className="app-panel">
-          {activeView !== "summary" ? <Tabs activeView={activeView} onActivate={activateView} /> : null}
+          <PrimaryTabs onActivate={() => activateView("summary")} />
 
           {message && <div className={`message ${message.isError ? "error" : ""}`}>{message.text}</div>}
 
@@ -859,6 +989,8 @@ function App() {
               onSort={changeSort}
               onActivate={activateView}
               onOpenStock={openStock}
+              onOpenTrade={(holding) => setTradeDraft({ account: activeAccount, holding })}
+              onOpenCash={() => setCashDraft({ account: activeAccount })}
               privateFundData={privateFundData[activeAccount.id]}
               onLoadPrivateFundMarks={loadPrivateFundMarks}
               onSavePrivateFundMark={(event) => handleSavePrivateFundMark(activeAccount.id, event)}
@@ -896,6 +1028,15 @@ function App() {
             />
           )}
 
+          {activeView === "import-holdings" && auth.isAdmin && (
+            <HoldingsImportPage
+              accounts={data.all_accounts || data.accounts}
+              fileLabel={fileLabel}
+              onFileChange={(event) => setFileLabel(event.target.files[0]?.name || "Choose CSV")}
+              onSubmit={handleImport}
+            />
+          )}
+
           {activeView === "imports" && <ImportsPage imports={data.imports} />}
 
           {activeView === "history" && (
@@ -914,6 +1055,23 @@ function App() {
           )}
         </section>
       </main>
+
+      {tradeDraft ? (
+        <TradeModal
+          account={tradeDraft.account}
+          holding={tradeDraft.holding}
+          onSubmit={(event) => handleSaveTrade(tradeDraft.account, tradeDraft.holding, event)}
+          onClose={() => setTradeDraft(null)}
+        />
+      ) : null}
+
+      {cashDraft ? (
+        <CashBalanceModal
+          account={cashDraft.account}
+          onSubmit={(event) => handleSaveCash(cashDraft.account, event)}
+          onClose={() => setCashDraft(null)}
+        />
+      ) : null}
     </>
   );
 }
@@ -923,7 +1081,7 @@ function LoginScreen({ message, onLogin }) {
     <main className="login-screen">
       <form className="login-panel" onSubmit={onLogin}>
         <div>
-          <h1>Portfolio Tracker</h1>
+          <h1>Investments</h1>
           <p>Sign in to continue</p>
         </div>
         {message && <div className={`message ${message.isError ? "error" : ""}`}>{message.text}</div>}
@@ -941,12 +1099,9 @@ function LoginScreen({ message, onLogin }) {
   );
 }
 
-function ImportForm({
-  accounts,
-  fileLabel,
-  onFileChange,
-  onSubmit,
+function SessionMenu({
   username,
+  onOpenHoldingsImport,
   onOpenAccounts,
   onOpenTransactions,
   onOpenImports,
@@ -964,24 +1119,6 @@ function ImportForm({
 
   return (
     <div className="top-actions">
-      <form className="upload-form" onSubmit={onSubmit}>
-        <label className="file-picker">
-          <input name="file" type="file" accept=".csv,text/csv" onChange={onFileChange} />
-          <span>{fileLabel}</span>
-        </label>
-        <input name="account_name" type="text" list="accountOptions" placeholder="Account override" />
-        <datalist id="accountOptions">
-          {accounts.map((account) => (
-            <option key={account.id} value={account.name} />
-          ))}
-        </datalist>
-        <input name="cash_balance" type="number" step="0.01" min="0" placeholder="Cash balance" />
-        <select name="cash_currency" aria-label="Cash currency" defaultValue="CAD">
-          <option value="CAD">CAD</option>
-          <option value="USD">USD</option>
-        </select>
-        <button type="submit">Import</button>
-      </form>
       <div className="session-menu">
         <button className="session-menu-button" type="button" onClick={() => setMenuOpen((open) => !open)}>
           <span>{username}</span>
@@ -989,6 +1126,11 @@ function ImportForm({
         </button>
         {menuOpen ? (
           <div className="session-menu-panel">
+            {isAdmin ? (
+              <button type="button" onClick={() => runMenuAction(onOpenHoldingsImport)}>
+                Import Holdings
+              </button>
+            ) : null}
             <button type="button" onClick={() => runMenuAction(onOpenAccounts)}>
               Accounts
             </button>
@@ -1016,44 +1158,158 @@ function ImportForm({
   );
 }
 
-function Tabs({ activeView, onActivate }) {
+function HoldingsImportPage({ accounts, fileLabel, onFileChange, onSubmit }) {
   return (
-    <div className="tabs" role="tablist" aria-label="Portfolio pages">
-      <button className={`tab ${activeView === "summary" ? "active" : ""}`} onClick={() => onActivate("summary")}>
-        Summary
+    <section className="view active">
+      <section className="section-panel">
+        <div className="panel-heading">
+          <h2>Import Holdings</h2>
+        </div>
+        <form className="holdings-import-form" onSubmit={onSubmit}>
+          <div className="holdings-import-field">
+            <span>Holdings CSV</span>
+            <label className="file-picker">
+              <input name="file" type="file" accept=".csv,text/csv" onChange={onFileChange} />
+              <span>{fileLabel}</span>
+            </label>
+          </div>
+          <label>
+            <span>Account override</span>
+            <input name="account_name" type="text" list="accountOptions" placeholder="Optional account name" />
+          </label>
+          <datalist id="accountOptions">
+            {accounts.map((account) => (
+              <option key={account.id} value={account.name} />
+            ))}
+          </datalist>
+          <label>
+            <span>Cash balance</span>
+            <input name="cash_balance" type="number" step="0.01" min="0" placeholder="Optional" />
+          </label>
+          <label>
+            <span>Cash currency</span>
+            <select name="cash_currency" defaultValue="CAD">
+              <option value="CAD">CAD</option>
+              <option value="USD">USD</option>
+            </select>
+          </label>
+          <div className="form-actions">
+            <button type="submit">Import Holdings</button>
+          </div>
+        </form>
+      </section>
+    </section>
+  );
+}
+
+function PrimaryTabs({ onActivate }) {
+  return (
+    <div className="tabs primary-tabs" role="tablist" aria-label="Investment sections">
+      <button className="tab active" onClick={onActivate}>
+        Portfolio
       </button>
+    </div>
+  );
+}
+
+function TradeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 7h10l-3-3" />
+      <path d="M17 17H7l3 3" />
+      <path d="M17 7 7 17" />
+    </svg>
+  );
+}
+
+function TradeModal({ account, holding, onSubmit, onClose }) {
+  const tradeCurrency = holding?.currency || account?.base_currency || "CAD";
+  const defaultPrice = Number(holding?.current_price ?? holding?.closing_price ?? holding?.average_cost ?? 0);
+  const defaultPriceText = Number.isFinite(defaultPrice) && defaultPrice > 0 ? defaultPrice.toFixed(2) : "";
+  const cashBalance = cashAmountForCurrency(account, tradeCurrency);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="trade-modal-title">
+        <div className="modal-heading">
+          <div>
+            <h2 id="trade-modal-title">Trade {tickerLabel(holding)}</h2>
+            <p>
+              {shortAccountName(account?.name)} - {tradeCurrency} cash {formatCurrency(cashBalance, tradeCurrency)}
+            </p>
+          </div>
+          <button className="icon-button" type="button" aria-label="Close" onClick={onClose}>
+            x
+          </button>
+        </div>
+        <form className="modal-form" onSubmit={onSubmit}>
+          <label>
+            <span>Date</span>
+            <input name="transaction_date" type="date" defaultValue={todayInputValue()} required />
+          </label>
+          <label>
+            <span>Shares</span>
+            <input name="shares" type="number" step="0.0001" min="0" required autoFocus />
+          </label>
+          <label>
+            <span>Price</span>
+            <input name="price" type="number" step="0.01" min="0" defaultValue={defaultPriceText} required />
+          </label>
+          <label className="checkbox-row modal-checkbox">
+            <input name="drip" type="checkbox" />
+            <span>DRIP</span>
+          </label>
+          <div className="form-actions">
+            <button type="submit">Save Trade</button>
+            <button className="secondary-button" type="button" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function CashBalanceModal({ account, onSubmit, onClose }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="cash-modal-title">
+        <div className="modal-heading">
+          <div>
+            <h2 id="cash-modal-title">Cash Balance</h2>
+            <p>{shortAccountName(account?.name)}</p>
+          </div>
+          <button className="icon-button" type="button" aria-label="Close" onClick={onClose}>
+            x
+          </button>
+        </div>
+        <form className="modal-form" onSubmit={onSubmit}>
+          <label>
+            <span>CAD cash</span>
+            <input name="cash_cad" type="number" step="0.01" defaultValue={cashInputDefault(account, "CAD")} autoFocus />
+          </label>
+          <label>
+            <span>USD cash</span>
+            <input name="cash_usd" type="number" step="0.01" defaultValue={cashInputDefault(account, "USD")} />
+          </label>
+          <div className="form-actions">
+            <button type="submit">Update Cash</button>
+            <button className="secondary-button" type="button" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </section>
     </div>
   );
 }
 
 function SummaryPage({ data, onActivate }) {
   const incomeByAccount = incomeByAccountFromHoldings(data.holdings);
-  const entityTotals = entityTotalsFromAccounts(data.accounts, incomeByAccount);
-  const hasCorporateAccounts = entityTotals.Corporate.count > 0;
-  const totalIncome = Array.from(incomeByAccount.values()).reduce((sum, income) => sum + income, 0);
-  const retirementIncome = data.accounts
-    .filter((account) => isRetirementIncomeAccount(account.name))
-    .reduce((sum, account) => sum + (incomeByAccount.get(account.name) || 0), 0);
-  const metrics = [
-    ["Current Value", data.totals.current_value ?? data.totals.closing_value],
-    ...(hasCorporateAccounts
-      ? [
-          ["Personal Value", entityTotals.Personal.balance],
-          ["Corporate Value", entityTotals.Corporate.balance],
-        ]
-      : []),
-    ["Income", totalIncome],
-    ...(hasCorporateAccounts ? [["Corporate Income", entityTotals.Corporate.income]] : []),
-    ["Retirement Income", retirementIncome],
-    ["Day Change", data.totals.day_change, "tone"],
-    ["Current Gain", data.totals.current_gain_loss ?? data.totals.gain_loss, "tone"],
-    ["Current Return", data.totals.current_gain_loss_pct ?? data.totals.gain_loss_pct, "percentTone"],
-  ];
 
   return (
     <section className="view active">
-      <Metrics metrics={metrics} />
-
       <section className="section-panel">
         <div className="panel-heading">
           <h2>Accounts</h2>
@@ -1517,6 +1773,8 @@ function AccountPage({
   onSort,
   onActivate,
   onOpenStock,
+  onOpenTrade,
+  onOpenCash,
   privateFundData,
   onLoadPrivateFundMarks,
   onSavePrivateFundMark,
@@ -1529,6 +1787,12 @@ function AccountPage({
         .filter((holding) => holding.account_name === account.name && holding.asset_type !== "Cash")
         .map((holding) => ({
           ...holding,
+          ...Object.fromEntries(
+            dividendIncomeForecastDates.map(([label, targetDate]) => [
+              forecastIncomeField(label),
+              forecastHoldingDividendIncome(holding, targetDate),
+            ])
+          ),
           account_weight: account.current_total_value
             ? (Number((holding.current_value ?? holding.closing_value) || 0) / account.current_total_value) * 100
             : 0,
@@ -1563,9 +1827,14 @@ function AccountPage({
           <p>{account.report_timestamp || ""}</p>
         </div>
         <div className="header-actions">
-          <div className="account-cash-pill">
-            <span>Cash</span>
-            <strong>{formatCashBalances(account)}</strong>
+          <div className="account-cash-group">
+            <div className="account-cash-pill">
+              <span>Cash</span>
+              <strong>{formatCashBalances(account)}</strong>
+            </div>
+            <button className="icon-button trade-button" type="button" title="Edit cash" aria-label="Edit cash" onClick={onOpenCash}>
+              <TradeIcon />
+            </button>
           </div>
           <button className="quiet-button" onClick={() => onActivate("summary")}>
             Summary
@@ -1597,6 +1866,7 @@ function AccountPage({
           showDerisk={showDerisk}
           onSort={onSort}
           onOpenStock={onOpenStock}
+          onOpenTrade={onOpenTrade}
         />
       </section>
 
@@ -1850,6 +2120,8 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
   const dividends = stock?.dividends || [];
   const recentDividends = [...dividends].slice(-8).reverse();
   const accounts = stock?.holdings?.accounts || [];
+  const forecastStartDate = stock?.fetched_at || todayInputValue();
+  const dividendGrowthPct = stats.five_year_dividend_growth_pct;
 
   return (
     <section className="view active">
@@ -1880,6 +2152,7 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
               ["Annual Forward Dividend", formatCurrency(stats.annual_forward_dividend, currency), "raw"],
               ["Forward Yield", stats.forward_yield_pct, "percentTone"],
               ["5Y Avg Yield", stats.five_year_avg_yield_pct, "percentTone"],
+              ["5Y Div Growth", stats.five_year_dividend_growth_pct, "percentTone"],
               ["Payments / Year", `${stats.payments_per_year || 0}`, "raw"],
             ]}
           />
@@ -1933,6 +2206,11 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
                       <th className="numeric">Avg Cost</th>
                       <th className="numeric">Value</th>
                       <th className="numeric">Annual Income</th>
+                      {dividendIncomeForecastDates.map(([label]) => (
+                        <th key={label} className="numeric">
+                          Forecast {label}
+                        </th>
+                      ))}
                       <th className="numeric">Gain</th>
                     </tr>
                   </thead>
@@ -1947,6 +2225,19 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
                           {formatMoney(account.annual_forward_income)}
                           <div className="row-sub">{formatPercent(account.yield_on_cost_pct)} on cost</div>
                         </td>
+                        {dividendIncomeForecastDates.map(([label, targetDate]) => {
+                          const forecastIncome = forecastDividendIncome(
+                            account.annual_forward_income,
+                            dividendGrowthPct,
+                            forecastStartDate,
+                            targetDate,
+                          );
+                          return (
+                            <td key={label} className="numeric">
+                              {forecastIncome === null ? "n/a" : formatMoney(forecastIncome)}
+                            </td>
+                          );
+                        })}
                         <td className={`numeric ${toneClass(account.gain_loss)}`}>
                           {formatMoney(account.gain_loss)}
                           <div className="row-sub">{formatPercent(account.gain_loss_pct)}</div>
@@ -2981,8 +3272,9 @@ function TableToolbar({ value, onChange, count, placeholder, children }) {
   );
 }
 
-function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, showDerisk, onSort, onOpenStock }) {
+function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, showDerisk, onSort, onOpenStock, onOpenTrade }) {
   const baseHeaders = [
+    ["trade", "", "action-column", false],
     ["description", "Company"],
     ["account_weight", "Alloc", "numeric"],
     ["symbol", "Ticker"],
@@ -2997,6 +3289,7 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
     ["day_change_pct", "Day", "numeric"],
     ["day_value_change", "DoD", "numeric"],
     ["annual_forward_income", "Income", "numeric"],
+    ...dividendIncomeForecastDates.map(([label]) => [forecastIncomeField(label), `Forecast ${label}`, "numeric"]),
   ];
   const deriskHeaders = [
     ["derisk_shares", "De-risk", "numeric derisk-column", false],
@@ -3013,6 +3306,16 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
       sum.currentValue += Number((holding.current_value ?? holding.closing_value) || 0);
       sum.dayValueChange += Number(holding.day_value_change || 0);
       sum.annualIncome += Number(holding.annual_forward_income || 0);
+      dividendIncomeForecastDates.forEach(([label]) => {
+        const forecastValue = holding[forecastIncomeField(label)];
+        if (forecastValue === null || forecastValue === undefined || Number.isNaN(Number(forecastValue))) {
+          if (Number(holding.annual_forward_income || 0) > 0) {
+            sum.forecastIncomeMissing[label] = true;
+          }
+        } else {
+          sum.forecastIncome[label] += Number(forecastValue);
+        }
+      });
       if (derisk.possible) {
         sum.deriskRecover += derisk.proceeds;
         sum.deriskValueLeft += derisk.valueLeft;
@@ -3020,7 +3323,16 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
       }
       return sum;
     },
-    { currentValue: 0, dayValueChange: 0, annualIncome: 0, deriskRecover: 0, deriskValueLeft: 0, deriskIncomeLost: 0 }
+    {
+      currentValue: 0,
+      dayValueChange: 0,
+      annualIncome: 0,
+      forecastIncome: Object.fromEntries(dividendIncomeForecastDates.map(([label]) => [label, 0])),
+      forecastIncomeMissing: Object.fromEntries(dividendIncomeForecastDates.map(([label]) => [label, false])),
+      deriskRecover: 0,
+      deriskValueLeft: 0,
+      deriskIncomeLost: 0,
+    }
   );
 
   return (
@@ -3029,7 +3341,7 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
         <thead>
           {accountName ? (
             <tr className="account-holdings-title-row">
-              <th>Account Name</th>
+              <th />
               <th colSpan={headers.length - 1}>{shortAccountName(accountName)}</th>
             </tr>
           ) : null}
@@ -3052,6 +3364,19 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
               const derisk = deriskForHolding(holding);
               return (
                 <tr key={`${holding.id}-${holding.account_name}`}>
+                  <td className="action-cell">
+                    {onOpenTrade && canTradeHolding(holding) ? (
+                      <button
+                        className="icon-button trade-button"
+                        type="button"
+                        title={`Trade ${tickerLabel(holding)}`}
+                        aria-label={`Trade ${tickerLabel(holding)}`}
+                        onClick={() => onOpenTrade(holding)}
+                      >
+                        <TradeIcon />
+                      </button>
+                    ) : null}
+                  </td>
                   <td>
                     <div className="description account-company" title={holding.description}>
                       {holding.description}
@@ -3087,6 +3412,14 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
                       : formatWholeMoney(holding.day_value_change)}
                   </td>
                   <td className="numeric income-cell">{formatWholeMoney(holding.annual_forward_income)}</td>
+                  {dividendIncomeForecastDates.map(([label]) => {
+                    const key = forecastIncomeField(label);
+                    return (
+                      <td key={key} className="numeric income-cell">
+                        {formatForecastIncome(holding[key])}
+                      </td>
+                    );
+                  })}
                   {showDerisk ? (
                     derisk.possible ? (
                       <>
@@ -3124,6 +3457,7 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
         {holdings.length ? (
           <tfoot>
             <tr>
+              <td />
               <td>Total</td>
               <td />
               <td />
@@ -3140,6 +3474,11 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
                 {formatWholeMoney(totals.dayValueChange)}
               </td>
               <td className="numeric income-cell">{formatWholeMoney(totals.annualIncome)}</td>
+              {dividendIncomeForecastDates.map(([label]) => (
+                <td key={label} className="numeric income-cell">
+                  {totals.forecastIncomeMissing[label] ? "n/a" : formatWholeMoney(totals.forecastIncome[label])}
+                </td>
+              ))}
               {showDerisk ? (
                 <>
                   <td />

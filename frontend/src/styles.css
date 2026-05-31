@@ -252,7 +252,11 @@ main {
   opacity: 0.65;
 }
 
-.app-panel,
+.app-panel {
+  display: grid;
+  gap: 0;
+}
+
 .view {
   display: grid;
   gap: 18px;
@@ -371,23 +375,49 @@ main {
 
 .tabs {
   display: flex;
-  gap: 8px;
-  padding: 12px;
+  gap: 0;
+  padding: 0 10px;
   overflow-x: auto;
+}
+
+.primary-tabs {
+  position: relative;
+  z-index: 1;
+  align-items: end;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .tab {
   flex: 0 0 auto;
-  min-height: 34px;
-  background: #ffffff;
+  min-height: 36px;
+  padding: 0 16px;
+  background: #eef3f6;
   color: var(--text);
-  border-color: var(--line);
+  border: 1px solid var(--line);
+  border-bottom-color: var(--line);
+  border-radius: 8px 8px 0 0;
+  box-shadow: none;
+  margin-right: 4px;
 }
 
 .tab.active {
-  background: var(--blue);
-  color: #ffffff;
-  border-color: var(--blue);
+  background: var(--surface);
+  color: var(--blue);
+  border-color: var(--line);
+  border-bottom-color: var(--surface);
+  transform: translateY(1px);
+}
+
+.app-panel > .view > .section-panel:first-child,
+.app-panel > .view > .account-header:first-child {
+  border-top-left-radius: 0;
+}
+
+.app-panel > .message {
+  margin: 14px 0;
 }
 
 .button-row {
@@ -431,6 +461,12 @@ main {
   align-items: center;
 }
 
+.account-cash-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .account-cash-pill {
   display: inline-flex;
   align-items: baseline;
@@ -472,18 +508,62 @@ main {
   opacity: 0.6;
 }
 
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.icon-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.icon-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trade-button {
+  color: var(--blue);
+}
+
 .row-actions {
   display: flex;
   justify-content: flex-end;
   margin-top: 6px;
 }
 
-.account-setup-form {
+.account-setup-form,
+.holdings-import-form {
   display: grid;
   gap: 12px;
 }
 
-.account-setup-form label {
+.holdings-import-form {
+  max-width: 560px;
+}
+
+.account-setup-form label,
+.holdings-import-form > label,
+.holdings-import-field {
   display: grid;
   gap: 5px;
 }
@@ -511,7 +591,9 @@ main {
   gap: 8px;
 }
 
-.account-setup-form label span {
+.account-setup-form label span,
+.holdings-import-form > label > span,
+.holdings-import-field > span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -519,7 +601,9 @@ main {
 
 .account-setup-form input,
 .account-setup-form select,
-.account-setup-form textarea {
+.account-setup-form textarea,
+.holdings-import-form input:not([type="file"]),
+.holdings-import-form select {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line);
@@ -536,6 +620,102 @@ main {
 .form-actions {
   display: flex;
   gap: 8px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(19, 28, 36, 0.38);
+}
+
+.modal-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(22, 34, 45, 0.22);
+}
+
+.modal-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.modal-heading h2 {
+  font-size: 17px;
+}
+
+.modal-heading p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-form {
+  display: grid;
+  gap: 12px;
+}
+
+.modal-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.modal-form label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.modal-form input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.modal-form button {
+  min-height: 38px;
+  border: 1px solid var(--blue);
+  border-radius: 6px;
+  background: var(--blue);
+  color: #ffffff;
+  padding: 0 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.modal-form .secondary-button {
+  background: #ffffff;
+  color: var(--blue);
+}
+
+.modal-form button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.modal-form .modal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-form .modal-checkbox input {
+  width: auto;
+  min-height: 0;
 }
 
 .private-fund-panel {
@@ -619,7 +799,8 @@ main {
   font-size: 12px;
 }
 
-.account-setup-form button {
+.account-setup-form button,
+.holdings-import-form button {
   min-height: 38px;
   border: 1px solid var(--blue);
   border-radius: 6px;
@@ -640,7 +821,8 @@ main {
   color: var(--blue);
 }
 
-.account-setup-form button:disabled {
+.account-setup-form button:disabled,
+.holdings-import-form button:disabled {
   cursor: progress;
   opacity: 0.65;
 }
@@ -873,11 +1055,11 @@ tr:hover td {
 }
 
 .account-holdings-wrap table {
-  min-width: 1360px;
+  min-width: 1560px;
 }
 
 .account-holdings-wrap table.show-derisk {
-  min-width: 1800px;
+  min-width: 2000px;
 }
 
 .account-holdings-table th,
@@ -896,6 +1078,17 @@ tr:hover td {
 
 .account-holdings-table th.sortable-header {
   cursor: pointer;
+}
+
+.account-holdings-table .action-column,
+.account-holdings-table .action-cell {
+  width: 42px;
+  min-width: 42px;
+  text-align: center;
+}
+
+.account-holdings-table .action-cell {
+  padding: 2px 4px;
 }
 
 .account-holdings-table .derisk-column {
@@ -1320,7 +1513,7 @@ tr:hover td {
 }
 
 .stock-holdings-table {
-  min-width: 640px;
+  min-width: 820px;
 }
 
 .history-heading {

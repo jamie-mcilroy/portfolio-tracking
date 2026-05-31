@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
@@ -31,6 +32,9 @@ PASSWORD_HASH_ITERATIONS = 260_000
 USD_CAD_SYMBOL = "USDCAD"
 USD_CAD_MARKET = "FX"
 USD_CAD_YAHOO_SYMBOL = "CAD=X"
+PRICE_REFRESH_LOCK = threading.Lock()
+PRICE_REFRESH_STALE_AFTER_SECONDS = 30 * 60
+YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 20
 TRANSACTION_TYPES = {
     "DIVIDEND",
     "DRIP",
@@ -1643,6 +1647,47 @@ def save_transaction(
     notes="",
 ):
     init_db()
+    with get_connection() as conn:
+        transaction_id = insert_portfolio_transaction(
+            conn,
+            account_id,
+            transaction_date,
+            transaction_type,
+            symbol,
+            market,
+            description,
+            currency,
+            quantity,
+            price,
+            dividend_per_share,
+            gross_amount,
+            fees,
+            tax,
+            net_amount,
+            notes,
+        )
+
+    return {"transaction": get_transaction(transaction_id), **list_transactions()}
+
+
+def insert_portfolio_transaction(
+    conn,
+    account_id,
+    transaction_date,
+    transaction_type,
+    symbol="",
+    market="",
+    description="",
+    currency="CAD",
+    quantity=None,
+    price=None,
+    dividend_per_share=None,
+    gross_amount=0.0,
+    fees=0.0,
+    tax=0.0,
+    net_amount=None,
+    notes="",
+):
     clean_date = normalize_transaction_date(transaction_date)
     clean_type = normalize_transaction_type(transaction_type)
     clean_symbol = str(symbol or "").strip().upper()
@@ -1661,43 +1706,40 @@ def save_transaction(
     )
     now = utc_now()
 
-    with get_connection() as conn:
-        account = conn.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone()
-        if not account:
-            raise ValueError("Account not found.")
-        cursor = conn.execute(
-            """
-            INSERT INTO portfolio_transactions (
-                account_id, transaction_date, transaction_type, symbol, market, description,
-                currency, quantity, price, dividend_per_share, gross_amount, fees, tax,
-                net_amount, notes, active, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                account_id,
-                clean_date,
-                clean_type,
-                clean_symbol,
-                clean_market,
-                str(description or "").strip(),
-                clean_currency,
-                clean_quantity,
-                clean_price,
-                clean_dividend,
-                clean_gross,
-                clean_fees,
-                clean_tax,
-                clean_net,
-                str(notes or "").strip(),
-                now,
-                now,
-            ),
+    account = conn.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    if not account:
+        raise ValueError("Account not found.")
+    cursor = conn.execute(
+        """
+        INSERT INTO portfolio_transactions (
+            account_id, transaction_date, transaction_type, symbol, market, description,
+            currency, quantity, price, dividend_per_share, gross_amount, fees, tax,
+            net_amount, notes, active, created_at, updated_at
         )
-        transaction_id = cursor.lastrowid
-        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
-
-    return {"transaction": get_transaction(transaction_id), **list_transactions()}
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        (
+            account_id,
+            clean_date,
+            clean_type,
+            clean_symbol,
+            clean_market,
+            str(description or "").strip(),
+            clean_currency,
+            clean_quantity,
+            clean_price,
+            clean_dividend,
+            clean_gross,
+            clean_fees,
+            clean_tax,
+            clean_net,
+            str(notes or "").strip(),
+            now,
+            now,
+        ),
+    )
+    conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+    return cursor.lastrowid
 
 
 def get_transaction(transaction_id):
@@ -1746,99 +1788,128 @@ def delete_transaction(transaction_id):
     return list_transactions()
 
 
-def update_latest_cash_balances(account_id, cash_balances=None):
-    init_db()
-    now = utc_now()
-    normalized_balances = normalize_cash_balances(cash_balances)
+def latest_batch_for_account(conn, account_id):
+    return conn.execute(
+        """
+        SELECT id, metadata_json
+        FROM import_batches
+        WHERE account_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
 
-    with get_connection() as conn:
-        usd_cad_rate = latest_usd_cad_rate_from_conn(conn)
-        valued_cash_balances = cash_balances_with_cad_values(normalized_balances, usd_cad_rate)
-        cash_cad_total = sum(item["value_cad"] for item in valued_cash_balances)
-        currencies = {item["currency"] for item in valued_cash_balances}
-        cash_currency_label = next(iter(currencies)) if len(currencies) == 1 else ("MIXED" if currencies else "")
-        batch = conn.execute(
-            """
-            SELECT id, metadata_json
-            FROM import_batches
-            WHERE account_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (account_id,),
-        ).fetchone()
-        if not batch:
-            batch_id = create_manual_cash_batch(conn, account_id, normalized_balances, now)
-            conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
-            return {
-                "updated": True,
-                "batch_id": batch_id,
-                "cash_balance": cash_cad_total,
-                "cash_balances": valued_cash_balances,
-                "cash_currency": cash_currency_label,
-                "initialized": True,
-            }
 
-        batch_id = batch["id"]
-        summary = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(closing_value), 0) AS securities_closing,
-                COALESCE(SUM(book_value), 0) AS securities_book,
-                COALESCE(SUM(gain_loss), 0) AS securities_gain
-            FROM currency_summaries
-            WHERE batch_id = ?
-            """,
-            (batch_id,),
-        ).fetchone()
+def cash_balances_for_batch(conn, batch_id):
+    rows = conn.execute(
+        """
+        SELECT currency, amount
+        FROM cash_balances
+        WHERE batch_id = ?
+        ORDER BY currency
+        """,
+        (batch_id,),
+    ).fetchall()
+    return [{"currency": row["currency"], "amount": row["amount"] or 0.0} for row in rows]
 
-        total_closing = (summary["securities_closing"] or 0.0) + cash_cad_total
-        total_book = (summary["securities_book"] or 0.0) + cash_cad_total
-        total_gain = summary["securities_gain"] or 0.0
-        total_gain_pct = (total_gain / total_book * 100.0) if total_book else None
 
-        try:
-            metadata = json.loads(batch["metadata_json"] or "{}")
-        except json.JSONDecodeError:
-            metadata = {}
-        metadata["cash_balance"] = cash_cad_total
-        metadata["cash_balances"] = valued_cash_balances
-        metadata["cash_currency"] = cash_currency_label
+def sync_batch_totals_from_holdings_and_cash(conn, batch_id, metadata_updates=None):
+    usd_cad_rate = latest_usd_cad_rate_from_conn(conn)
+    holding_rows = conn.execute(
+        """
+        SELECT
+            currency,
+            COALESCE(SUM(closing_value), 0) AS closing_value,
+            COALESCE(SUM(book_value), 0) AS book_value,
+            COALESCE(SUM(gain_loss), 0) AS gain_loss
+        FROM holdings
+        WHERE batch_id = ?
+        GROUP BY currency
+        """,
+        (batch_id,),
+    ).fetchall()
 
-        conn.execute("DELETE FROM cash_balances WHERE batch_id = ?", (batch_id,))
-        if valued_cash_balances:
-            conn.executemany(
-                """
-                INSERT INTO cash_balances (batch_id, currency, amount)
-                VALUES (?, ?, ?)
-                """,
-                [(batch_id, item["currency"], item["amount"]) for item in valued_cash_balances],
-            )
-
+    conn.execute("DELETE FROM currency_summaries WHERE batch_id = ?", (batch_id,))
+    for row in holding_rows:
+        book_value = row["book_value"] or 0.0
+        gain_loss = row["gain_loss"] or 0.0
         conn.execute(
             """
-            UPDATE import_batches
-            SET
-                total_closing_value = ?,
-                total_book_value = ?,
-                total_gain_loss = ?,
-                total_gain_loss_pct = ?,
-                metadata_json = ?
-            WHERE id = ?
+            INSERT INTO currency_summaries (
+                batch_id, currency, closing_value, book_value, gain_loss, gain_loss_pct
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                total_closing,
-                total_book,
-                total_gain,
-                total_gain_pct,
-                json.dumps(metadata, sort_keys=True),
                 batch_id,
+                normalize_currency(row["currency"]),
+                row["closing_value"] or 0.0,
+                book_value,
+                gain_loss,
+                (gain_loss / book_value * 100.0) if book_value else None,
             ),
         )
-        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+
+    cash_balances = cash_balances_for_batch(conn, batch_id)
+    valued_cash_balances = cash_balances_with_cad_values(cash_balances, usd_cad_rate)
+    cash_cad_total = sum(item["value_cad"] for item in valued_cash_balances)
+    currencies = {item["currency"] for item in valued_cash_balances}
+    cash_currency_label = next(iter(currencies)) if len(currencies) == 1 else ("MIXED" if currencies else "")
+
+    securities_closing = 0.0
+    securities_book = 0.0
+    securities_gain = 0.0
+    for row in holding_rows:
+        fx_to_cad = fx_to_cad_for_currency(row["currency"], usd_cad_rate)
+        securities_closing += (row["closing_value"] or 0.0) * fx_to_cad
+        securities_book += (row["book_value"] or 0.0) * fx_to_cad
+        securities_gain += (row["gain_loss"] or 0.0) * fx_to_cad
+
+    total_closing = securities_closing + cash_cad_total
+    total_book = securities_book + cash_cad_total
+    total_gain_pct = (securities_gain / total_book * 100.0) if total_book else None
+
+    batch = conn.execute(
+        """
+        SELECT metadata_json
+        FROM import_batches
+        WHERE id = ?
+        """,
+        (batch_id,),
+    ).fetchone()
+    try:
+        metadata = json.loads((batch or {}).get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    metadata["cash_balance"] = cash_cad_total
+    metadata["cash_balances"] = valued_cash_balances
+    metadata["cash_currency"] = cash_currency_label
+    if metadata_updates:
+        metadata.update(metadata_updates)
+
+    conn.execute(
+        """
+        UPDATE import_batches
+        SET
+            total_closing_value = ?,
+            total_book_value = ?,
+            total_gain_loss = ?,
+            total_gain_loss_pct = ?,
+            metadata_json = ?
+        WHERE id = ?
+        """,
+        (
+            total_closing,
+            total_book,
+            securities_gain,
+            total_gain_pct,
+            json.dumps(metadata, sort_keys=True),
+            batch_id,
+        ),
+    )
 
     return {
-        "updated": True,
         "batch_id": batch_id,
         "cash_balance": cash_cad_total,
         "cash_balances": valued_cash_balances,
@@ -1846,11 +1917,271 @@ def update_latest_cash_balances(account_id, cash_balances=None):
     }
 
 
+def set_latest_cash_balances_for_account(conn, account_id, normalized_balances, now):
+    usd_cad_rate = latest_usd_cad_rate_from_conn(conn)
+    valued_cash_balances = cash_balances_with_cad_values(normalized_balances, usd_cad_rate)
+    cash_cad_total = sum(item["value_cad"] for item in valued_cash_balances)
+    currencies = {item["currency"] for item in valued_cash_balances}
+    cash_currency_label = next(iter(currencies)) if len(currencies) == 1 else ("MIXED" if currencies else "")
+    batch = latest_batch_for_account(conn, account_id)
+    if not batch:
+        batch_id = create_manual_cash_batch(conn, account_id, normalized_balances, now)
+        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        return {
+            "batch_id": batch_id,
+            "cash_balance": cash_cad_total,
+            "cash_balances": valued_cash_balances,
+            "cash_currency": cash_currency_label,
+            "initialized": True,
+        }
+
+    batch_id = batch["id"]
+    conn.execute("DELETE FROM cash_balances WHERE batch_id = ?", (batch_id,))
+    if valued_cash_balances:
+        conn.executemany(
+            """
+            INSERT INTO cash_balances (batch_id, currency, amount)
+            VALUES (?, ?, ?)
+            """,
+            [(batch_id, item["currency"], item["amount"]) for item in valued_cash_balances],
+        )
+    result = sync_batch_totals_from_holdings_and_cash(conn, batch_id)
+    conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+    return result
+
+
+def update_latest_cash_balances(account_id, cash_balances=None):
+    init_db()
+    now = utc_now()
+    normalized_balances = normalize_cash_balances(cash_balances)
+
+    with get_connection() as conn:
+        result = set_latest_cash_balances_for_account(conn, account_id, normalized_balances, now)
+
+    return {"updated": True, **result}
+
+
 def update_latest_cash_balance(account_id, cash_balance=None, cash_currency: str = "CAD"):
     return update_latest_cash_balances(
         account_id,
         [{"currency": cash_currency, "amount": normalize_cash_balance(cash_balance)}],
     )
+
+
+def apply_account_trade(
+    account_id,
+    transaction_date,
+    shares,
+    price,
+    drip=False,
+    holding_id="",
+    manual_holding_id=None,
+    symbol="",
+    market="",
+    description="",
+):
+    init_db()
+    clean_date = normalize_transaction_date(transaction_date)
+    clean_shares = money_value(shares)
+    clean_price = money_value(price)
+    if clean_shares <= 0:
+        raise ValueError("Shares must be greater than zero.")
+    if clean_price <= 0:
+        raise ValueError("Price must be greater than zero.")
+
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    trade_value = clean_shares * clean_price
+    now = utc_now()
+    drip_trade = bool(drip)
+
+    with get_connection() as conn:
+        account = conn.execute(
+            """
+            SELECT id, name
+            FROM accounts
+            WHERE id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if not account:
+            raise ValueError("Account not found.")
+
+        batch = latest_batch_for_account(conn, account_id)
+        batch_id = batch["id"] if batch else None
+        holding = None
+        manual_holding = None
+
+        clean_manual_holding_id = None
+        if manual_holding_id not in {None, ""}:
+            clean_manual_holding_id = int(manual_holding_id)
+        else:
+            holding_text = str(holding_id or "")
+            if holding_text.startswith("manual-"):
+                clean_manual_holding_id = int(holding_text.replace("manual-", "", 1))
+
+        if clean_manual_holding_id is not None:
+            manual_holding = conn.execute(
+                """
+                SELECT *
+                FROM manual_holdings
+                WHERE id = ? AND account_id = ? AND active = 1
+                """,
+                (clean_manual_holding_id, account_id),
+            ).fetchone()
+            if not manual_holding:
+                raise ValueError("Holding not found.")
+        else:
+            if not batch_id:
+                raise ValueError("No current holdings snapshot found for this account.")
+            holding_text = str(holding_id or "")
+            params = [batch_id]
+            filters = ["batch_id = ?"]
+            if holding_text.isdigit():
+                filters.append("id = ?")
+                params.append(int(holding_text))
+            else:
+                if not clean_symbol:
+                    raise ValueError("Ticker is required.")
+                filters.append("UPPER(COALESCE(symbol, '')) = ?")
+                params.append(clean_symbol)
+                filters.append("UPPER(COALESCE(market, '')) = ?")
+                params.append(clean_market)
+            holding = conn.execute(
+                f"""
+                SELECT *
+                FROM holdings
+                WHERE {' AND '.join(filters)}
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            if not holding:
+                raise ValueError("Holding not found.")
+            if str(holding["asset_type"] or "").strip().lower() in {"cash", "private fund"}:
+                raise ValueError("Trades are only supported for stock holdings.")
+
+        trade_currency = normalize_currency(
+            (manual_holding or holding).get("currency") or "CAD"
+        )
+        if not drip_trade:
+            cash_by_currency = {
+                item["currency"]: item["amount"]
+                for item in normalize_cash_balances(cash_balances_for_batch(conn, batch_id) if batch_id else [])
+            }
+            current_cash = cash_by_currency.get(trade_currency, 0.0)
+            if trade_value - current_cash > 0.005:
+                raise ValueError(
+                    f"Purchase amount {trade_currency} {trade_value:,.2f} exceeds "
+                    f"{trade_currency} cash balance {current_cash:,.2f}."
+                )
+            cash_by_currency[trade_currency] = current_cash - trade_value
+
+        if manual_holding:
+            old_quantity = money_value(manual_holding["quantity"])
+            old_average_cost = money_value(manual_holding["average_cost"])
+            old_book_value = old_quantity * old_average_cost
+            new_quantity = old_quantity + clean_shares
+            new_book_value = old_book_value + trade_value
+            new_average_cost = new_book_value / new_quantity if new_quantity else clean_price
+            clean_symbol = str(manual_holding["symbol"] or "").strip().upper()
+            clean_market = str(manual_holding["market"] or "").strip().upper()
+            clean_description = str(description or manual_holding["description"] or clean_symbol).strip()
+            conn.execute(
+                """
+                UPDATE manual_holdings
+                SET quantity = ?, average_cost = ?, description = ?, updated_at = ?
+                WHERE id = ? AND account_id = ?
+                """,
+                (
+                    new_quantity,
+                    new_average_cost,
+                    clean_description,
+                    now,
+                    manual_holding["id"],
+                    account_id,
+                ),
+            )
+        else:
+            old_quantity = money_value(holding["quantity"])
+            old_book_value = money_value(holding["book_value"])
+            closing_price = finite_float(holding["closing_price"])
+            if closing_price is None or closing_price <= 0:
+                closing_price = clean_price
+            new_quantity = old_quantity + clean_shares
+            new_book_value = old_book_value + trade_value
+            new_average_cost = new_book_value / new_quantity if new_quantity else clean_price
+            new_closing_value = new_quantity * closing_price
+            new_gain_loss = new_closing_value - new_book_value
+            new_gain_loss_pct = (new_gain_loss / new_book_value * 100.0) if new_book_value else None
+            clean_symbol = str(holding["symbol"] or "").strip().upper()
+            clean_market = str(holding["market"] or "").strip().upper()
+            clean_description = str(description or holding["description"] or clean_symbol).strip()
+            conn.execute(
+                """
+                UPDATE holdings
+                SET
+                    quantity = ?,
+                    average_cost = ?,
+                    closing_value = ?,
+                    book_value = ?,
+                    gain_loss = ?,
+                    gain_loss_pct = ?
+                WHERE id = ? AND batch_id = ?
+                """,
+                (
+                    new_quantity,
+                    new_average_cost,
+                    new_closing_value,
+                    new_book_value,
+                    new_gain_loss,
+                    new_gain_loss_pct,
+                    holding["id"],
+                    batch_id,
+                ),
+            )
+
+        cash_result = None
+        if not drip_trade:
+            cash_result = set_latest_cash_balances_for_account(
+                conn,
+                account_id,
+                [{"currency": currency, "amount": amount} for currency, amount in cash_by_currency.items()],
+                now,
+            )
+        elif batch_id:
+            sync_batch_totals_from_holdings_and_cash(conn, batch_id)
+
+        transaction_id = insert_portfolio_transaction(
+            conn,
+            account_id,
+            clean_date,
+            "DRIP" if drip_trade else "BUY",
+            clean_symbol,
+            clean_market,
+            clean_description,
+            trade_currency,
+            clean_shares,
+            clean_price,
+            None,
+            trade_value,
+            0.0,
+            0.0,
+            0.0 if drip_trade else -abs(trade_value),
+            "DRIP - cash unchanged" if drip_trade else "",
+        )
+        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+
+    return {
+        "updated": True,
+        "transaction": get_transaction(transaction_id),
+        "cash": cash_result,
+        "message": (
+            f"Recorded DRIP for {clean_shares:g} {clean_symbol}."
+            if drip_trade
+            else f"Recorded purchase of {clean_shares:g} {clean_symbol}."
+        ),
+    }
 
 
 def get_accounts():
@@ -2555,6 +2886,8 @@ def yahoo_symbol_for(symbol, market):
         return ""
     if cleaned_market in {"CDN", "CAN", "CA", "TSX", "TSXV"}:
         return f"{cleaned_symbol}.TO"
+    if cleaned_market == "US":
+        return cleaned_symbol.replace(".", "-")
     return cleaned_symbol
 
 
@@ -2564,14 +2897,29 @@ def active_price_targets():
         rows = conn.execute(
             f"""
             SELECT DISTINCT
-                holdings.symbol,
-                holdings.market,
-                holdings.currency
-            FROM holdings
-            WHERE holdings.batch_id IN ({latest_batch_filter_sql()})
-                AND COALESCE(holdings.symbol, '') != ''
-                AND UPPER(COALESCE(holdings.symbol, '')) != 'CASH'
-            ORDER BY holdings.market, holdings.symbol
+                symbol,
+                market,
+                currency
+            FROM (
+                SELECT
+                    holdings.symbol,
+                    holdings.market,
+                    holdings.currency
+                FROM holdings
+                WHERE holdings.batch_id IN ({latest_batch_filter_sql()})
+                    AND COALESCE(holdings.symbol, '') != ''
+                    AND UPPER(COALESCE(holdings.symbol, '')) != 'CASH'
+                UNION ALL
+                SELECT
+                    manual_holdings.symbol,
+                    manual_holdings.market,
+                    manual_holdings.currency
+                FROM manual_holdings
+                WHERE manual_holdings.active = 1
+                    AND COALESCE(manual_holdings.symbol, '') != ''
+                    AND UPPER(COALESCE(manual_holdings.symbol, '')) != 'CASH'
+            )
+            ORDER BY market, symbol
             """
         ).fetchall()
 
@@ -2695,6 +3043,21 @@ def latest_price_status():
         "latest_fetched_at": count_row["latest_fetched_at"] if count_row else None,
         "total_day_change": count_row["total_day_change"] if count_row else None,
     }
+
+
+def mark_stale_price_refreshes(now: str):
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=PRICE_REFRESH_STALE_AFTER_SECONDS)).isoformat(
+        timespec="seconds"
+    )
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE price_refreshes
+            SET completed_at = ?, status = ?, error = COALESCE(error, ?)
+            WHERE status = ? AND started_at < ?
+            """,
+            (now, "error", "Stale running refresh marked failed.", "running", cutoff),
+        )
 
 
 def balance_snapshot_exists(market_date: str) -> bool:
@@ -2994,8 +3357,34 @@ def save_balance_snapshot(market_date: str, source: str = "auto"):
 
 
 def refresh_current_prices():
+    if not PRICE_REFRESH_LOCK.acquire(blocking=False):
+        init_db()
+        completed_at = utc_now()
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO price_refreshes (started_at, completed_at, status, symbol_count, error)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (completed_at, completed_at, "skipped", 0, "Price refresh already running."),
+            )
+        return {
+            "status": "skipped",
+            "symbol_count": 0,
+            "completed_at": completed_at,
+            "error": "Price refresh already running.",
+        }
+
+    try:
+        return _refresh_current_prices()
+    finally:
+        PRICE_REFRESH_LOCK.release()
+
+
+def _refresh_current_prices():
     init_db()
     started_at = utc_now()
+    mark_stale_price_refreshes(started_at)
     targets = active_price_targets()
     needs_usd_cad = portfolio_needs_usd_cad() or any(str(target["market"] or "").upper() == "US" for target in targets)
 
@@ -3034,7 +3423,8 @@ def refresh_current_prices():
             group_by="ticker",
             auto_adjust=False,
             progress=False,
-            threads=True,
+            threads=False,
+            timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
         )
         daily_downloaded = yf.download(
             tickers=download_symbols,
@@ -3043,7 +3433,8 @@ def refresh_current_prices():
             group_by="ticker",
             auto_adjust=False,
             progress=False,
-            threads=True,
+            threads=False,
+            timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
         )
         fetched_at = utc_now()
 
@@ -3459,6 +3850,48 @@ def annual_forward_dividend_stats(dividends):
     }
 
 
+def five_year_dividend_growth_stats(dividends):
+    parsed_dividends = []
+    for dividend in dividends:
+        ex_date = parse_iso_day(dividend["ex_date"])
+        amount = finite_float(dividend.get("dividend_per_share"))
+        if ex_date and amount is not None and amount > 0:
+            parsed_dividends.append(
+                {
+                    "ex_date": dividend["ex_date"],
+                    "date": ex_date,
+                    "dividend_per_share": amount,
+                }
+            )
+
+    parsed_dividends.sort(key=lambda item: item["date"])
+    if len(parsed_dividends) < 2:
+        return {
+            "five_year_dividend_growth_pct": None,
+            "five_year_dividend_growth_years": 0,
+            "five_year_dividend_growth_start_date": None,
+            "five_year_dividend_growth_end_date": None,
+        }
+
+    latest = parsed_dividends[-1]
+    five_year_cutoff = latest["date"] - timedelta(days=round(365.25 * 5))
+    start = next((item for item in parsed_dividends if item["date"] >= five_year_cutoff), parsed_dividends[0])
+    years = (latest["date"] - start["date"]).days / 365.25
+    if years <= 0 or start["dividend_per_share"] <= 0:
+        growth_pct = None
+    else:
+        growth_pct = ((latest["dividend_per_share"] / start["dividend_per_share"]) ** (1 / years) - 1) * 100.0
+
+    return {
+        "five_year_dividend_growth_pct": growth_pct,
+        "five_year_dividend_growth_years": years,
+        "five_year_dividend_growth_start_date": start["ex_date"],
+        "five_year_dividend_growth_end_date": latest["ex_date"],
+        "five_year_dividend_growth_start_dividend": start["dividend_per_share"],
+        "five_year_dividend_growth_end_dividend": latest["dividend_per_share"],
+    }
+
+
 def unique_stock_targets_from_holdings(holdings):
     targets = {}
     for holding in holdings:
@@ -3524,10 +3957,14 @@ def stock_forward_dividend_map_for_holdings(holdings):
     for row in rows:
         dividends_by_symbol.setdefault(row["yahoo_symbol"], []).append(row)
 
-    return {
-        yahoo_symbol: annual_forward_dividend_stats(dividends_by_symbol.get(yahoo_symbol, []))
-        for yahoo_symbol in targets
-    }
+    dividend_stats = {}
+    for yahoo_symbol in targets:
+        dividends = dividends_by_symbol.get(yahoo_symbol, [])
+        stats = annual_forward_dividend_stats(dividends)
+        stats.update(five_year_dividend_growth_stats(dividends))
+        dividend_stats[yahoo_symbol] = stats
+
+    return dividend_stats
 
 
 def stock_holdings(symbol, market, annual_forward_dividend=0.0):
@@ -3654,6 +4091,7 @@ def get_stock_detail(symbol, market, refresh=False):
     latest_date = parse_iso_day(latest_price_date) if latest_price_date else None
     ttm = trailing_dividend(dividends, latest_date) if latest_date else 0.0
     forward_stats = annual_forward_dividend_stats(dividends)
+    dividend_growth_stats = five_year_dividend_growth_stats(dividends)
     current_yield_pct = (ttm / current_price * 100.0) if ttm and current_price else None
     forward_yield_pct = (
         forward_stats["annual_forward_dividend"] / current_price * 100.0
@@ -3686,6 +4124,7 @@ def get_stock_detail(symbol, market, refresh=False):
             "current_yield_pct": current_yield_pct,
             "forward_yield_pct": forward_yield_pct,
             "five_year_avg_yield_pct": five_year_avg_yield_pct,
+            **dividend_growth_stats,
             "price_count": len(prices),
             "dividend_count": len(dividends),
         },
@@ -3820,6 +4259,7 @@ def get_summary():
             """
         ).fetchall()
         usd_cad_rate = latest_usd_cad_rate_from_conn(conn)
+        manual_holdings = manual_holding_summary_rows(conn, usd_cad_rate)
 
     total_closing = sum(account["total_closing_value"] or 0.0 for account in accounts)
     total_book = sum(account["total_book_value"] or 0.0 for account in accounts)
@@ -3882,6 +4322,7 @@ def get_summary():
             }
         )
 
+    holdings = holdings + manual_holdings
     security_count = len(holdings)
     holdings = holdings + cash_holdings
     ensure_stock_analytics_cache_for_holdings(holdings)
@@ -3910,6 +4351,7 @@ def get_summary():
             holding["previous_value"] = current_value
             holding["annual_forward_dividend"] = 0.0
             holding["annual_forward_income"] = 0.0
+            holding["five_year_dividend_growth_pct"] = None
             holding["payments_per_year"] = 0
             holding["latest_dividend"] = None
             holding["latest_ex_date"] = None
@@ -3972,6 +4414,7 @@ def get_summary():
         holding["payments_per_year"] = forward_stats.get("payments_per_year") or 0
         holding["annual_forward_dividend"] = annual_forward_dividend
         holding["annual_forward_income"] = annual_forward_dividend * quantity
+        holding["five_year_dividend_growth_pct"] = forward_stats.get("five_year_dividend_growth_pct")
         holding["current_price_error"] = price_row["error"] if price_row else None
         holding["current_value"] = current_value
         holding["current_gain_loss"] = current_gain

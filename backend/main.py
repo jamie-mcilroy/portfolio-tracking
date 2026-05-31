@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from server import (
     BASE_DIR,
+    apply_account_trade,
     authenticate_user,
     balance_snapshot_exists,
     create_user,
@@ -147,6 +148,22 @@ class TransactionPayload(BaseModel):
     tax: float = 0
     net_amount: Optional[float] = None
     notes: str = ""
+
+
+class AccountTradePayload(BaseModel):
+    transaction_date: str
+    shares: float
+    price: float
+    drip: bool = False
+    holding_id: str = ""
+    manual_holding_id: Optional[int] = None
+    symbol: str = ""
+    market: str = ""
+    description: str = ""
+
+
+class CashBalancesPayload(BaseModel):
+    cash_balances: list[CashBalancePayload]
 
 
 class AccountHistoryValuePayload(BaseModel):
@@ -291,10 +308,13 @@ def maybe_save_end_of_day_snapshot():
 
 def price_refresh_loop():
     while not price_refresh_stop.is_set():
-        if is_price_refresh_window():
-            refresh_current_prices()
-        else:
-            maybe_save_end_of_day_snapshot()
+        try:
+            if is_price_refresh_window():
+                refresh_current_prices()
+            else:
+                maybe_save_end_of_day_snapshot()
+        except Exception as exc:
+            print(f"price refresh loop error: {exc}", flush=True)
         price_refresh_stop.wait(PRICE_REFRESH_SECONDS)
 
 
@@ -427,6 +447,36 @@ def add_transaction(payload: TransactionPayload, username: str = Depends(require
 def remove_transaction(transaction_id: int, username: str = Depends(require_auth)):
     try:
         return delete_transaction(transaction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/accounts/{account_id}/trades")
+def account_trade(account_id: int, payload: AccountTradePayload, username: str = Depends(require_auth)):
+    try:
+        return apply_account_trade(
+            account_id,
+            payload.transaction_date,
+            payload.shares,
+            payload.price,
+            payload.drip,
+            payload.holding_id,
+            payload.manual_holding_id,
+            payload.symbol,
+            payload.market,
+            payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/api/accounts/{account_id}/cash")
+def edit_account_cash(account_id: int, payload: CashBalancesPayload, username: str = Depends(require_auth)):
+    try:
+        return update_latest_cash_balances(
+            account_id,
+            [item.dict() for item in payload.cash_balances],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
