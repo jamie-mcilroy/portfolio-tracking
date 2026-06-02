@@ -982,6 +982,7 @@ function App() {
           {activeView === "account" && activeAccount && (
             <AccountPage
               account={activeAccount}
+              accounts={data.accounts || []}
               holdings={data.holdings}
               history={historyData}
               query={accountQuery}
@@ -1767,6 +1768,7 @@ function PrivateFundPanel({ data, account, onSubmit }) {
 
 function AccountPage({
   account,
+  accounts,
   holdings,
   history,
   query,
@@ -1824,11 +1826,12 @@ function AccountPage({
   return (
     <section className="view active">
       <div className="account-header">
-        <div>
+        <div className="account-title">
           <h2>{account.name}</h2>
           <p>{account.report_timestamp || ""}</p>
         </div>
         <div className="header-actions">
+          <AccountSwitcher account={account} accounts={accounts} onActivate={onActivate} />
           <div className="account-cash-group">
             <div className="account-cash-pill">
               <span>Cash</span>
@@ -1888,6 +1891,35 @@ function AccountPage({
         </section>
       </section>
     </section>
+  );
+}
+
+function AccountSwitcher({ account, accounts, onActivate }) {
+  const accountOptions = sortAccountsForDisplay(accounts || []);
+
+  if (!accountOptions.length) {
+    return null;
+  }
+
+  return (
+    <label className="account-switcher">
+      <span>Account</span>
+      <select
+        value={String(account.id)}
+        onChange={(event) => {
+          const nextAccountId = Number(event.target.value);
+          if (nextAccountId !== Number(account.id)) {
+            onActivate("account", nextAccountId);
+          }
+        }}
+      >
+        {accountOptions.map((option) => (
+          <option key={option.id} value={String(option.id)}>
+            {shortAccountName(option.name)} - {formatMoney(option.current_total_value ?? option.total_closing_value)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
