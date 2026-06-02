@@ -214,6 +214,21 @@ main {
   box-shadow: var(--shadow);
 }
 
+.login-brand {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.login-logo {
+  display: block;
+  width: min(220px, 70vw);
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
 .login-panel p {
   color: var(--muted);
   margin-top: 2px;

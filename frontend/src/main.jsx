@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import wbfcLogoUrl from "./assets/wbfc-logo.png";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -1080,7 +1081,8 @@ function LoginScreen({ message, onLogin }) {
   return (
     <main className="login-screen">
       <form className="login-panel" onSubmit={onLogin}>
-        <div>
+        <div className="login-brand">
+          <img className="login-logo" src={wbfcLogoUrl} alt="West Bragg Forestry Corp logo" decoding="async" />
           <h1>Investments</h1>
           <p>Sign in to continue</p>
         </div>
