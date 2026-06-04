@@ -24,9 +24,11 @@ from server import (
     balance_snapshot_exists,
     create_user,
     delete_transaction,
+    delete_fundamentals_watchlist_stock,
     ensure_auth_user,
     get_accounts,
     get_balance_snapshots,
+    get_fundamentals,
     get_stock_detail,
     get_summary,
     get_user_by_username,
@@ -42,6 +44,7 @@ from server import (
     refresh_current_prices,
     save_balance_snapshot,
     save_account,
+    save_fundamentals_watchlist_stock,
     save_private_fund_mark,
     save_transaction,
     update_account,
@@ -164,6 +167,12 @@ class AccountTradePayload(BaseModel):
 
 class CashBalancesPayload(BaseModel):
     cash_balances: list[CashBalancePayload]
+
+
+class FundamentalsWatchlistPayload(BaseModel):
+    symbol: str
+    market: str = "CDN"
+    description: str = ""
 
 
 class AccountHistoryValuePayload(BaseModel):
@@ -524,6 +533,27 @@ def refresh_prices(username: str = Depends(require_auth)):
 def stock_detail(symbol: str, market: str = "", refresh: bool = False, username: str = Depends(require_auth)):
     try:
         return get_stock_detail(symbol, market, refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/fundamentals")
+def fundamentals(refresh: bool = False, username: str = Depends(require_auth)):
+    return get_fundamentals(refresh)
+
+
+@app.post("/api/fundamentals/watchlist")
+def add_fundamentals_watchlist_stock(payload: FundamentalsWatchlistPayload, username: str = Depends(require_auth)):
+    try:
+        return save_fundamentals_watchlist_stock(payload.symbol, payload.market, payload.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/fundamentals/watchlist/{symbol}")
+def remove_fundamentals_watchlist_stock(symbol: str, market: str = "CDN", username: str = Depends(require_auth)):
+    try:
+        return delete_fundamentals_watchlist_stock(symbol, market)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

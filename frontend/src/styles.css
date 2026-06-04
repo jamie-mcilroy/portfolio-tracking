@@ -1566,6 +1566,214 @@ tr:hover td {
   min-width: 820px;
 }
 
+.fundamentals-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fundamentals-heading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.fundamentals-add-section {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 8px 0 16px;
+  background: #f8fafb;
+}
+
+.fundamentals-add-section summary {
+  min-height: 40px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 10px 12px;
+}
+
+.fundamentals-add-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(110px, 150px) minmax(160px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.fundamentals-add-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.fundamentals-add-form span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.fundamentals-add-form input,
+.fundamentals-add-form select {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.fundamentals-add-form button {
+  min-height: 36px;
+  border: 1px solid var(--blue);
+  border-radius: 6px;
+  background: var(--blue);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 800;
+  padding: 0 16px;
+}
+
+.fundamentals-add-form button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.fundamentals-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.fundamentals-filter label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+.fundamentals-filter input {
+  width: auto;
+  margin: 0;
+}
+
+.fundamentals-filter label:has(input:checked) {
+  border-color: #c7d6e5;
+  color: var(--blue);
+}
+
+.fundamentals-table-wrap table {
+  min-width: 1530px;
+}
+
+.fundamentals-table th,
+.fundamentals-table td {
+  padding: 6px 8px;
+  border: 1px solid #cfd5d9;
+  font-size: 13px;
+}
+
+.fundamentals-table th {
+  background: #6f787e;
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.fundamentals-table th.sortable-header {
+  cursor: pointer;
+}
+
+.fundamentals-table td {
+  color: #000000;
+}
+
+.fundamentals-table .action-column,
+.fundamentals-table .action-cell {
+  width: 44px;
+  min-width: 44px;
+  text-align: center;
+}
+
+.fundamentals-table .status-column,
+.fundamentals-table .status-cell {
+  width: 58px;
+  min-width: 58px;
+  text-align: center;
+}
+
+.status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.status-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.status-icon.owned {
+  border-color: #b8d8c7;
+  color: var(--green);
+}
+
+.status-icon.watchlist {
+  border-color: #c7d6e5;
+  color: var(--blue);
+}
+
+.row-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #ffffff;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.row-action-button:hover {
+  border-color: #c7d6e5;
+  color: var(--blue);
+}
+
+.row-action-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
 .history-heading {
   display: flex;
   align-items: flex-start;
@@ -1685,6 +1893,14 @@ tr:hover td {
     justify-content: stretch;
   }
 
+  .fundamentals-add-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fundamentals-filter {
+    flex-wrap: wrap;
+  }
+
   .top-actions {
     justify-items: stretch;
   }
@@ -1760,6 +1976,10 @@ tr:hover td {
   }
 
   .history-upload-form {
+    grid-template-columns: 1fr;
+  }
+
+  .fundamentals-add-form {
     grid-template-columns: 1fr;
   }
 }

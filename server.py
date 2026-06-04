@@ -14,10 +14,12 @@ import threading
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
+from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -35,6 +37,12 @@ USD_CAD_YAHOO_SYMBOL = "CAD=X"
 PRICE_REFRESH_LOCK = threading.Lock()
 PRICE_REFRESH_STALE_AFTER_SECONDS = 30 * 60
 YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 20
+EPS_HISTORY_YEARS = 10
+ALPHAQUERY_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
 TRANSACTION_TYPES = {
     "DIVIDEND",
     "DRIP",
@@ -488,6 +496,50 @@ def init_db():
                 error TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS stock_fundamentals (
+                yahoo_symbol TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'CAD',
+                eps_current REAL,
+                pe_ratio REAL,
+                book_value_per_share REAL,
+                fifty_two_week_high REAL,
+                fifty_two_week_low REAL,
+                fetched_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_eps_history (
+                yahoo_symbol TEXT NOT NULL,
+                fiscal_year INTEGER NOT NULL,
+                eps REAL NOT NULL,
+                fetched_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'alphaquery',
+                PRIMARY KEY (yahoo_symbol, fiscal_year)
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_eps_refreshes (
+                yahoo_symbol TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS fundamentals_watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL DEFAULT 'CDN',
+                description TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (symbol, market)
+            );
+
             CREATE TABLE IF NOT EXISTS balance_snapshots (
                 market_date TEXT PRIMARY KEY,
                 total_value REAL NOT NULL DEFAULT 0,
@@ -556,6 +608,14 @@ def init_db():
         for column, definition in price_column_defs.items():
             if column not in price_columns:
                 conn.execute(f"ALTER TABLE latest_prices ADD COLUMN {column} {definition}")
+
+        fundamentals_columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_fundamentals)").fetchall()}
+        fundamentals_column_defs = {
+            "eps_current": "REAL",
+        }
+        for column, definition in fundamentals_column_defs.items():
+            if column not in fundamentals_columns:
+                conn.execute(f"ALTER TABLE stock_fundamentals ADD COLUMN {column} {definition}")
 
 
 def dict_from_row(cursor, row):
@@ -3633,6 +3693,360 @@ def stock_cache_is_stale(meta):
     return datetime.now(timezone.utc) - fetched_at > timedelta(seconds=STOCK_ANALYTICS_TTL_SECONDS)
 
 
+def stock_fundamentals_cache_is_stale(meta):
+    if not meta or not meta.get("fetched_at"):
+        return True
+    if meta.get("status") != "ok":
+        return True
+    try:
+        fetched_at = datetime.fromisoformat(meta["fetched_at"])
+    except ValueError:
+        return True
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - fetched_at > timedelta(seconds=STOCK_ANALYTICS_TTL_SECONDS)
+
+
+def info_float(info, *keys):
+    for key in keys:
+        value = finite_float(info.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+class AlphaQueryEPSTableParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_target_table = False
+        self.table_depth = 0
+        self.in_row = False
+        self.in_cell = False
+        self.current_cell = []
+        self.current_row = []
+        self.rows = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        if tag == "table":
+            class_name = attrs_dict.get("class", "")
+            if self.in_target_table:
+                self.table_depth += 1
+            elif "table-basic" in class_name and "table-bordered" in class_name:
+                self.in_target_table = True
+                self.table_depth = 1
+            return
+
+        if not self.in_target_table:
+            return
+        if tag == "tr":
+            self.in_row = True
+            self.current_row = []
+        elif tag == "td" and self.in_row:
+            self.in_cell = True
+            self.current_cell = []
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.current_cell.append(data)
+
+    def handle_endtag(self, tag):
+        if not self.in_target_table:
+            return
+        if tag == "td" and self.in_cell:
+            self.current_row.append("".join(self.current_cell).strip())
+            self.current_cell = []
+            self.in_cell = False
+        elif tag == "tr" and self.in_row:
+            if self.current_row:
+                self.rows.append(self.current_row)
+            self.current_row = []
+            self.in_row = False
+        elif tag == "table":
+            self.table_depth -= 1
+            if self.table_depth <= 0:
+                self.in_target_table = False
+                self.table_depth = 0
+
+
+def alphaquery_symbol_candidates(symbol, market):
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    candidates = []
+
+    if clean_market in {"CDN", "CAN", "CA", "TSX", "TSXV"}:
+        candidates.append(f"T.{clean_symbol.split('.', 1)[0]}")
+    else:
+        candidates.append(clean_symbol.replace("-", "."))
+        candidates.append(clean_symbol.replace(".", "-"))
+        candidates.append(clean_symbol)
+
+    seen = set()
+    return [candidate for candidate in candidates if candidate and not (candidate in seen or seen.add(candidate))]
+
+
+def fetch_earnings_history_page(symbol, market):
+    errors = []
+    for alpha_symbol in alphaquery_symbol_candidates(symbol, market):
+        url = f"https://www.alphaquery.com/stock/{alpha_symbol}/earnings-history"
+        request = Request(url, headers={"User-Agent": ALPHAQUERY_USER_AGENT})
+        try:
+            with urlopen(request, timeout=30) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            errors.append(f"{alpha_symbol}: {exc}")
+    raise ValueError("; ".join(errors) or "No AlphaQuery symbol candidates.")
+
+
+def parse_alphaquery_date(value):
+    text = str(value or "").strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return parse_iso_day(text)
+
+
+def parse_eps_value(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    text = re.sub(r"[^\d.-]", "", text)
+    parsed = finite_float(text)
+    if parsed is None:
+        return None
+    return -abs(parsed) if negative else parsed
+
+
+def parse_eps_table(html_text):
+    parser = AlphaQueryEPSTableParser()
+    parser.feed(html_text)
+
+    eps_rows = []
+    for row in parser.rows:
+        if len(row) != 4:
+            continue
+        fiscal_quarter_end = parse_alphaquery_date(row[1])
+        actual_eps = parse_eps_value(row[3])
+        if fiscal_quarter_end and actual_eps is not None:
+            eps_rows.append({"fiscal_quarter_end": fiscal_quarter_end, "actual_eps": actual_eps})
+    return eps_rows
+
+
+def selected_eps_years(num_years=EPS_HISTORY_YEARS):
+    end_year = datetime.now(timezone.utc).year - 1
+    return list(range(end_year - num_years + 1, end_year + 1))
+
+
+def build_yearly_eps_series(symbol, market, num_years=EPS_HISTORY_YEARS):
+    html_text = fetch_earnings_history_page(symbol, market)
+    rows = parse_eps_table(html_text)
+    years = selected_eps_years(num_years)
+    selected = set(years)
+    totals = {}
+    for row in rows:
+        year = row["fiscal_quarter_end"].year
+        if year in selected:
+            totals[year] = totals.get(year, 0.0) + row["actual_eps"]
+    return {year: round(value, 2) for year, value in sorted(totals.items())}
+
+
+def stock_eps_meta(conn, yahoo_symbol):
+    return conn.execute(
+        """
+        SELECT *
+        FROM stock_eps_refreshes
+        WHERE yahoo_symbol = ?
+        """,
+        (yahoo_symbol,),
+    ).fetchone()
+
+
+def stock_eps_cache_is_stale(meta):
+    if not meta or not meta.get("fetched_at"):
+        return True
+    if meta.get("status") in {"ok", "empty"}:
+        try:
+            fetched_at = datetime.fromisoformat(meta["fetched_at"])
+        except ValueError:
+            return True
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - fetched_at > timedelta(seconds=STOCK_ANALYTICS_TTL_SECONDS)
+    return True
+
+
+def refresh_stock_eps_history(symbol, market):
+    init_db()
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    yahoo_symbol = yahoo_symbol_for(clean_symbol, clean_market)
+    if not yahoo_symbol:
+        raise ValueError("A stock symbol is required.")
+
+    fetched_at = utc_now()
+    try:
+        years = build_yearly_eps_series(clean_symbol, clean_market, EPS_HISTORY_YEARS)
+        status = "ok" if years else "empty"
+        error = None if years else "No EPS data table found."
+
+        with get_connection() as conn:
+            conn.execute("DELETE FROM stock_eps_history WHERE yahoo_symbol = ?", (yahoo_symbol,))
+            conn.executemany(
+                """
+                INSERT INTO stock_eps_history (yahoo_symbol, fiscal_year, eps, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol, fiscal_year) DO UPDATE SET
+                    eps = excluded.eps,
+                    fetched_at = excluded.fetched_at,
+                    source = excluded.source
+                """,
+                [(yahoo_symbol, year, eps, fetched_at, "alphaquery") for year, eps in years.items()],
+            )
+            conn.execute(
+                """
+                INSERT INTO stock_eps_refreshes (
+                    yahoo_symbol, symbol, market, fetched_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    market = excluded.market,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (yahoo_symbol, clean_symbol, clean_market, fetched_at, status, error),
+            )
+
+        return {
+            "status": status,
+            "symbol": clean_symbol,
+            "market": clean_market,
+            "yahoo_symbol": yahoo_symbol,
+            "eps_count": len(years),
+            "fetched_at": fetched_at,
+        }
+    except Exception as exc:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO stock_eps_refreshes (
+                    yahoo_symbol, symbol, market, fetched_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    market = excluded.market,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (yahoo_symbol, clean_symbol, clean_market, fetched_at, "error", str(exc)),
+            )
+        raise
+
+
+def refresh_stock_fundamentals(symbol, market):
+    init_db()
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "").strip().upper()
+    yahoo_symbol = yahoo_symbol_for(clean_symbol, clean_market)
+    if not yahoo_symbol:
+        raise ValueError("A stock symbol is required.")
+
+    fetched_at = utc_now()
+    try:
+        import yfinance as yf
+
+        ticker = yf.Ticker(yahoo_symbol)
+        if hasattr(ticker, "get_info"):
+            info = ticker.get_info() or {}
+        else:
+            info = ticker.info or {}
+
+        currency = str(info.get("currency") or info.get("financialCurrency") or stock_currency_for(clean_market)).upper()
+        eps_current = info_float(info, "trailingEps", "forwardEps")
+        pe_ratio = info_float(info, "trailingPE", "forwardPE")
+        book_value_per_share = info_float(info, "bookValue")
+        fifty_two_week_high = info_float(info, "fiftyTwoWeekHigh")
+        fifty_two_week_low = info_float(info, "fiftyTwoWeekLow")
+
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO stock_fundamentals (
+                    yahoo_symbol, symbol, market, currency, eps_current, pe_ratio, book_value_per_share,
+                    fifty_two_week_high, fifty_two_week_low, fetched_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    market = excluded.market,
+                    currency = excluded.currency,
+                    eps_current = excluded.eps_current,
+                    pe_ratio = excluded.pe_ratio,
+                    book_value_per_share = excluded.book_value_per_share,
+                    fifty_two_week_high = excluded.fifty_two_week_high,
+                    fifty_two_week_low = excluded.fifty_two_week_low,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (
+                    yahoo_symbol,
+                    clean_symbol,
+                    clean_market,
+                    currency,
+                    eps_current,
+                    pe_ratio,
+                    book_value_per_share,
+                    fifty_two_week_high,
+                    fifty_two_week_low,
+                    fetched_at,
+                    "ok",
+                    None,
+                ),
+            )
+
+        return {
+            "status": "ok",
+            "symbol": clean_symbol,
+            "market": clean_market,
+            "yahoo_symbol": yahoo_symbol,
+            "fetched_at": fetched_at,
+        }
+    except Exception as exc:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO stock_fundamentals (
+                    yahoo_symbol, symbol, market, currency, fetched_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(yahoo_symbol) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    market = excluded.market,
+                    currency = excluded.currency,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (
+                    yahoo_symbol,
+                    clean_symbol,
+                    clean_market,
+                    stock_currency_for(clean_market),
+                    fetched_at,
+                    "error",
+                    str(exc),
+                ),
+            )
+        raise
+
+
 def refresh_stock_analytics(symbol, market):
     init_db()
     clean_symbol = str(symbol or "").strip().upper()
@@ -4135,6 +4549,484 @@ def get_stock_detail(symbol, market, refresh=False):
     }
 
 
+def current_stock_targets_from_summary(summary):
+    targets = {}
+    for holding in summary.get("holdings", []):
+        if holding.get("asset_type") == "Cash":
+            continue
+        symbol = str(holding.get("symbol") or "").strip().upper()
+        market = str(holding.get("market") or "").strip().upper()
+        yahoo_symbol = yahoo_symbol_for(symbol, market)
+        if not yahoo_symbol:
+            continue
+
+        target = targets.setdefault(
+            yahoo_symbol,
+            {
+                "symbol": symbol,
+                "market": market,
+                "yahoo_symbol": yahoo_symbol,
+                "description": holding.get("description") or symbol,
+                "currency": stock_currency_for(market),
+                "quantity": 0.0,
+                "current_value": 0.0,
+                "current_price": None,
+                "current_price_date": None,
+                "owned": True,
+                "watchlist": False,
+            },
+        )
+        target["owned"] = True
+        if not target.get("description") and holding.get("description"):
+            target["description"] = holding["description"]
+
+        target["quantity"] += Number_or_zero(holding.get("quantity"))
+        target["current_value"] += Number_or_zero(holding.get("current_value") or holding.get("closing_value"))
+
+        source_currency = str(
+            holding.get("source_price_currency")
+            or holding.get("source_currency")
+            or holding.get("currency")
+            or stock_currency_for(market)
+        ).upper()
+        target["currency"] = source_currency or target["currency"]
+
+        source_price = finite_float(holding.get("source_price"))
+        source_closing_price = finite_float(holding.get("source_closing_price"))
+        cad_current_price = finite_float(holding.get("current_price"))
+        if source_price is not None:
+            target["current_price"] = source_price
+        elif source_closing_price is not None:
+            target["current_price"] = source_closing_price
+        elif market != "US" and cad_current_price is not None:
+            target["current_price"] = cad_current_price
+
+        price_date = holding.get("price_quote_time") or holding.get("current_price_fetched_at") or holding.get("imported_at")
+        if price_date and (not target["current_price_date"] or str(price_date) > str(target["current_price_date"])):
+            target["current_price_date"] = price_date
+
+    return targets
+
+
+def normalize_fundamentals_symbol(symbol, market="CDN"):
+    clean_symbol = str(symbol or "").strip().upper()
+    clean_market = str(market or "CDN").strip().upper()
+
+    if ":" in clean_symbol:
+        prefix, _, suffix = clean_symbol.partition(":")
+        clean_symbol = suffix.strip().upper()
+        if prefix in {"TSE", "TSX", "TSXV", "CDN", "CAN", "CA"}:
+            clean_market = "CDN"
+        elif prefix in {"NYSE", "NASDAQ", "US", "AMEX"}:
+            clean_market = "US"
+
+    if clean_symbol.endswith(".TO"):
+        clean_symbol = clean_symbol[:-3]
+        clean_market = "CDN"
+
+    if clean_market in {"TSE", "TSX", "TSXV", "CAN", "CA"}:
+        clean_market = "CDN"
+
+    return clean_symbol, clean_market
+
+
+def fundamentals_watchlist_rows(conn):
+    return conn.execute(
+        """
+        SELECT *
+        FROM fundamentals_watchlist
+        WHERE active = 1
+        ORDER BY market, symbol
+        """
+    ).fetchall()
+
+
+def merge_watchlist_targets(targets):
+    with get_connection() as conn:
+        rows = fundamentals_watchlist_rows(conn)
+
+    for row in rows:
+        symbol = str(row["symbol"] or "").strip().upper()
+        market = str(row["market"] or "").strip().upper()
+        yahoo_symbol = yahoo_symbol_for(symbol, market)
+        if not yahoo_symbol:
+            continue
+
+        target = targets.setdefault(
+            yahoo_symbol,
+            {
+                "symbol": symbol,
+                "market": market,
+                "yahoo_symbol": yahoo_symbol,
+                "description": row.get("description") or symbol,
+                "currency": stock_currency_for(market),
+                "quantity": 0.0,
+                "current_value": 0.0,
+                "current_price": None,
+                "current_price_date": None,
+                "owned": False,
+                "watchlist": True,
+            },
+        )
+        target["watchlist"] = True
+        if not target.get("description") or target.get("description") == target["symbol"]:
+            target["description"] = row.get("description") or target["description"]
+
+
+def ensure_stock_analytics_cache_for_targets(targets, refresh=False):
+    if not targets:
+        return
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in targets)
+        existing = conn.execute(
+            f"""
+            SELECT *
+            FROM stock_analytics_refreshes
+            WHERE yahoo_symbol IN ({placeholders})
+            """,
+            list(targets),
+        ).fetchall()
+
+    cached = {
+        row["yahoo_symbol"]
+        for row in existing
+        if row["status"] == "ok" and not stock_cache_is_stale(row)
+    }
+
+    for yahoo_symbol, target in targets.items():
+        if refresh or yahoo_symbol not in cached:
+            try:
+                refresh_stock_analytics(target["symbol"], target["market"])
+            except Exception:
+                continue
+
+
+def ensure_stock_eps_cache_for_targets(targets, refresh=False):
+    if not targets:
+        return
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in targets)
+        existing = conn.execute(
+            f"""
+            SELECT *
+            FROM stock_eps_refreshes
+            WHERE yahoo_symbol IN ({placeholders})
+            """,
+            list(targets),
+        ).fetchall()
+
+    cached = {
+        row["yahoo_symbol"]
+        for row in existing
+        if not stock_eps_cache_is_stale(row)
+    }
+
+    for yahoo_symbol, target in targets.items():
+        if refresh or yahoo_symbol not in cached:
+            try:
+                refresh_stock_eps_history(target["symbol"], target["market"])
+            except Exception:
+                continue
+
+
+def save_fundamentals_watchlist_stock(symbol, market="CDN", description=""):
+    init_db()
+    clean_symbol, clean_market = normalize_fundamentals_symbol(symbol, market)
+    if not clean_symbol:
+        raise ValueError("Ticker is required.")
+    if not yahoo_symbol_for(clean_symbol, clean_market):
+        raise ValueError("Ticker cannot be mapped to a Yahoo Finance symbol.")
+
+    now = utc_now()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO fundamentals_watchlist (
+                symbol, market, description, active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, 1, ?, ?)
+            ON CONFLICT(symbol, market) DO UPDATE SET
+                description = excluded.description,
+                active = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                clean_symbol,
+                clean_market,
+                str(description or "").strip(),
+                now,
+                now,
+            ),
+        )
+
+    try:
+        refresh_stock_analytics(clean_symbol, clean_market)
+    except Exception:
+        pass
+    try:
+        refresh_stock_fundamentals(clean_symbol, clean_market)
+    except Exception:
+        pass
+    try:
+        refresh_stock_eps_history(clean_symbol, clean_market)
+    except Exception:
+        pass
+
+    return get_fundamentals(refresh=False)
+
+
+def delete_fundamentals_watchlist_stock(symbol, market="CDN"):
+    init_db()
+    clean_symbol, clean_market = normalize_fundamentals_symbol(symbol, market)
+    if not clean_symbol:
+        raise ValueError("Ticker is required.")
+
+    now = utc_now()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_watchlist
+            SET active = 0, updated_at = ?
+            WHERE symbol = ? AND market = ?
+            """,
+            (now, clean_symbol, clean_market),
+        )
+
+    return get_fundamentals(refresh=False)
+
+
+def recent_price_range(prices):
+    parsed_prices = []
+    for price in prices:
+        price_date = parse_iso_day(price["date"])
+        close = finite_float(price.get("close"))
+        if price_date and close is not None:
+            parsed_prices.append((price_date, close))
+    if not parsed_prices:
+        return (None, None)
+
+    latest_date = max(date for date, _ in parsed_prices)
+    cutoff = latest_date - timedelta(days=365)
+    recent_closes = [close for date, close in parsed_prices if cutoff <= date <= latest_date]
+    if not recent_closes:
+        return (None, None)
+    return (max(recent_closes), min(recent_closes))
+
+
+def get_fundamentals(refresh=False):
+    init_db()
+    summary = get_summary()
+    targets = current_stock_targets_from_summary(summary)
+    merge_watchlist_targets(targets)
+    if not targets:
+        return {"rows": [], "eps_years": selected_eps_years(EPS_HISTORY_YEARS), "fetched_at": utc_now()}
+
+    ensure_stock_analytics_cache_for_targets(targets, refresh)
+    ensure_stock_eps_cache_for_targets(targets, refresh)
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in targets)
+        cached_rows = conn.execute(
+            f"""
+            SELECT *
+            FROM stock_fundamentals
+            WHERE yahoo_symbol IN ({placeholders})
+            """,
+            list(targets),
+        ).fetchall()
+
+    cached_by_symbol = {row["yahoo_symbol"]: row for row in cached_rows}
+    for yahoo_symbol, target in targets.items():
+        meta = cached_by_symbol.get(yahoo_symbol)
+        if refresh or stock_fundamentals_cache_is_stale(meta):
+            try:
+                refresh_stock_fundamentals(target["symbol"], target["market"])
+            except Exception:
+                continue
+
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in targets)
+        fundamentals_rows = conn.execute(
+            f"""
+            SELECT *
+            FROM stock_fundamentals
+            WHERE yahoo_symbol IN ({placeholders})
+            """,
+            list(targets),
+        ).fetchall()
+        price_rows = conn.execute(
+            f"""
+            SELECT yahoo_symbol, date, close, currency, fetched_at
+            FROM stock_price_history
+            WHERE yahoo_symbol IN ({placeholders})
+            ORDER BY yahoo_symbol, date
+            """,
+            list(targets),
+        ).fetchall()
+        dividend_rows = conn.execute(
+            f"""
+            SELECT yahoo_symbol, ex_date, dividend_per_share, currency, fetched_at
+            FROM stock_dividend_history
+            WHERE yahoo_symbol IN ({placeholders})
+            ORDER BY yahoo_symbol, ex_date
+            """,
+            list(targets),
+        ).fetchall()
+        eps_rows = conn.execute(
+            f"""
+            SELECT yahoo_symbol, fiscal_year, eps, fetched_at
+            FROM stock_eps_history
+            WHERE yahoo_symbol IN ({placeholders})
+            ORDER BY yahoo_symbol, fiscal_year
+            """,
+            list(targets),
+        ).fetchall()
+        eps_refresh_rows = conn.execute(
+            f"""
+            SELECT *
+            FROM stock_eps_refreshes
+            WHERE yahoo_symbol IN ({placeholders})
+            """,
+            list(targets),
+        ).fetchall()
+        latest_price_rows = conn.execute(
+            """
+            SELECT symbol, market, price, price_currency, quote_time, fetched_at
+            FROM latest_prices
+            """
+        ).fetchall()
+
+    fundamentals_by_symbol = {row["yahoo_symbol"]: row for row in fundamentals_rows}
+    latest_price_by_target = {
+        (str(row["symbol"] or "").strip().upper(), str(row["market"] or "").strip().upper()): row
+        for row in latest_price_rows
+    }
+    prices_by_symbol = {}
+    for row in price_rows:
+        prices_by_symbol.setdefault(row["yahoo_symbol"], []).append(row)
+    dividends_by_symbol = {}
+    for row in dividend_rows:
+        dividends_by_symbol.setdefault(row["yahoo_symbol"], []).append(row)
+    eps_by_symbol = {}
+    for row in eps_rows:
+        eps_by_symbol.setdefault(row["yahoo_symbol"], {})[int(row["fiscal_year"])] = row["eps"]
+    eps_refresh_by_symbol = {row["yahoo_symbol"]: row for row in eps_refresh_rows}
+
+    eps_years = selected_eps_years(EPS_HISTORY_YEARS)
+    rows = []
+    for yahoo_symbol, target in targets.items():
+        fundamentals = fundamentals_by_symbol.get(yahoo_symbol)
+        prices = prices_by_symbol.get(yahoo_symbol, [])
+        dividends = dividends_by_symbol.get(yahoo_symbol, [])
+        eps_history = eps_by_symbol.get(yahoo_symbol, {})
+        eps_refresh = eps_refresh_by_symbol.get(yahoo_symbol)
+        latest_price = latest_price_by_target.get((target["symbol"], target["market"]))
+
+        current_price = finite_float(latest_price["price"] if latest_price else None)
+        current_price_date = None
+        currency = target["currency"]
+        if latest_price:
+            current_price_date = latest_price.get("quote_time") or latest_price.get("fetched_at")
+            currency = latest_price.get("price_currency") or currency
+        if current_price is None:
+            current_price = target["current_price"]
+            current_price_date = target["current_price_date"]
+
+        latest_price_point = prices[-1] if prices else None
+        if current_price is None and latest_price_point:
+            current_price = latest_price_point["close"]
+            current_price_date = latest_price_point["date"]
+        latest_price_date = parse_iso_day(latest_price_point["date"]) if latest_price_point else None
+        ttm = trailing_dividend(dividends, latest_price_date) if latest_price_date else 0.0
+        dividend_yield_pct = (ttm / current_price * 100.0) if ttm and current_price else None
+        monthly_yields = monthly_yield_series(prices, dividends)
+        five_year_dividend_yield_pct = (
+            sum(item["yield_pct"] for item in monthly_yields) / len(monthly_yields) if monthly_yields else None
+        )
+        fallback_high, fallback_low = recent_price_range(prices)
+        fifty_two_week_high = (
+            fundamentals["fifty_two_week_high"]
+            if fundamentals and fundamentals.get("fifty_two_week_high") is not None
+            else fallback_high
+        )
+        fifty_two_week_low = (
+            fundamentals["fifty_two_week_low"]
+            if fundamentals and fundamentals.get("fifty_two_week_low") is not None
+            else fallback_low
+        )
+        price_position_52w_pct = (
+            (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100.0
+            if current_price is not None
+            and fifty_two_week_high is not None
+            and fifty_two_week_low is not None
+            and fifty_two_week_high > fifty_two_week_low
+            else None
+        )
+        eps_values = [eps_history[year] for year in eps_years if eps_history.get(year) is not None]
+        eps_recent_year = max((year for year in eps_years if eps_history.get(year) is not None), default=None)
+        eps_recent = eps_history.get(eps_recent_year) if eps_recent_year is not None else None
+        eps_avg_10y = sum(eps_values) / len(eps_values) if eps_values else None
+        book_value_per_share = fundamentals["book_value_per_share"] if fundamentals else None
+        graham_price = (
+            math.sqrt(22.5 * eps_avg_10y * book_value_per_share)
+            if eps_avg_10y is not None
+            and book_value_per_share is not None
+            and eps_avg_10y > 0
+            and book_value_per_share > 0
+            else None
+        )
+        graham_delta_pct = (
+            (current_price - graham_price) / graham_price * 100.0
+            if current_price is not None and graham_price is not None and graham_price > 0
+            else None
+        )
+
+        rows.append(
+            {
+                "symbol": target["symbol"],
+                "market": target["market"],
+                "yahoo_symbol": yahoo_symbol,
+                "description": target["description"],
+                "currency": (currency or (fundamentals["currency"] if fundamentals else target["currency"]) or "CAD").upper(),
+                "quantity": target["quantity"],
+                "current_value": target["current_value"],
+                "owned": bool(target.get("owned")),
+                "watchlist": bool(target.get("watchlist")),
+                "position_status": "Owned" if target.get("owned") else "Watchlist",
+                "current_price": current_price,
+                "current_price_date": current_price_date,
+                "fifty_two_week_high": fifty_two_week_high,
+                "fifty_two_week_low": fifty_two_week_low,
+                "price_position_52w_pct": price_position_52w_pct,
+                "eps_current": fundamentals["eps_current"] if fundamentals else None,
+                "eps_recent": eps_recent,
+                "eps_recent_year": eps_recent_year,
+                "eps_avg_10y": eps_avg_10y,
+                "eps_history": {str(year): eps_history.get(year) for year in eps_years},
+                "pe_ratio": fundamentals["pe_ratio"] if fundamentals else None,
+                "book_value_per_share": book_value_per_share,
+                "graham_price": graham_price,
+                "graham_delta_pct": graham_delta_pct,
+                "dividend_yield_pct": dividend_yield_pct,
+                "five_year_dividend_yield_pct": five_year_dividend_yield_pct,
+                "fundamentals_fetched_at": fundamentals["fetched_at"] if fundamentals else None,
+                "eps_fetched_at": eps_refresh["fetched_at"] if eps_refresh else None,
+                "eps_status": eps_refresh["status"] if eps_refresh else "empty",
+                "eps_error": eps_refresh["error"] if eps_refresh else None,
+                "analytics_fetched_at": latest_price_point["fetched_at"] if latest_price_point else None,
+                "status": fundamentals["status"] if fundamentals else "empty",
+                "error": fundamentals["error"] if fundamentals else None,
+            }
+        )
+        for year in eps_years:
+            rows[-1][f"eps_{year}"] = eps_history.get(year)
+
+    rows.sort(key=lambda row: row["symbol"])
+    return {"rows": rows, "eps_years": eps_years, "fetched_at": utc_now()}
+
+
 def latest_batch_filter_sql():
     return """
         SELECT MAX(import_batches.id)
@@ -4610,6 +5502,12 @@ class PortfolioHandler(BaseHTTPRequestHandler):
 
         if path == "/api/summary":
             self.send_json(get_summary())
+            return
+
+        if path == "/api/fundamentals":
+            params = parse_qs(parsed.query)
+            refresh = params.get("refresh", ["false"])[0].lower() in {"1", "true", "yes", "on"}
+            self.send_json(get_fundamentals(refresh))
             return
 
         if path == "/api/accounts":

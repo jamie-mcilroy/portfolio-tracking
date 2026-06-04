@@ -92,11 +92,25 @@ function formatCurrency(value, currency = "CAD") {
   }).format(Number(value || 0));
 }
 
+function formatMaybeCurrency(value, currency = "CAD") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  return formatCurrency(value, currency);
+}
+
 function formatPercent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "n/a";
   }
   return `${Number(value).toFixed(2)}%`;
+}
+
+function formatRatio(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  return Number(value).toFixed(2);
 }
 
 function formatDate(value) {
@@ -344,6 +358,9 @@ function apiFetch(path, options = {}) {
 function App() {
   const [auth, setAuth] = useState({ status: "checking", username: null, isAdmin: false });
   const [data, setData] = useState(null);
+  const [fundamentalsData, setFundamentalsData] = useState(null);
+  const [fundamentalsLoading, setFundamentalsLoading] = useState(false);
+  const [fundamentalsError, setFundamentalsError] = useState("");
   const [historyData, setHistoryData] = useState(null);
   const [usersData, setUsersData] = useState(null);
   const [transactionsData, setTransactionsData] = useState(null);
@@ -354,6 +371,8 @@ function App() {
   const [stockData, setStockData] = useState(null);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState("");
+  const [fundamentalsQuery, setFundamentalsQuery] = useState("");
+  const [fundamentalsSort, setFundamentalsSort] = useState({ key: "symbol", direction: "asc" });
   const [accountQuery, setAccountQuery] = useState("");
   const [sort, setSort] = useState({ key: "current_value", direction: "desc" });
   const [message, setMessage] = useState(null);
@@ -373,6 +392,81 @@ function App() {
     ) {
       setActiveView("summary");
       setActiveAccountId(null);
+    }
+  }
+
+  async function loadFundamentals(refresh = false) {
+    setFundamentalsLoading(true);
+    setFundamentalsError("");
+    try {
+      const response = await apiFetch(`/api/fundamentals${refresh ? "?refresh=true" : ""}`);
+      const payload = await parseApiResponse(response);
+      setFundamentalsData(payload);
+      if (refresh) {
+        showMessage("Updated fundamentals.");
+      }
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      } else {
+        setFundamentalsError(error.message);
+      }
+    } finally {
+      setFundamentalsLoading(false);
+    }
+  }
+
+  async function handleAddFundamentalsStock(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    const payload = Object.fromEntries(new FormData(form).entries());
+
+    button.disabled = true;
+    setFundamentalsError("");
+    try {
+      const response = await apiFetch("/api/fundamentals/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await parseApiResponse(response);
+      setFundamentalsData(result);
+      form.reset();
+      form.elements.market.value = "CDN";
+      showMessage(`Added ${tickerLabel(payload)} to fundamentals.`);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      } else {
+        setFundamentalsError(error.message);
+      }
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleRemoveFundamentalsStock(row) {
+    if (!row?.symbol) {
+      return;
+    }
+
+    setFundamentalsError("");
+    try {
+      const params = new URLSearchParams();
+      if (row.market) params.set("market", row.market);
+      const response = await apiFetch(`/api/fundamentals/watchlist/${encodeURIComponent(row.symbol)}?${params.toString()}`, {
+        method: "DELETE",
+      });
+      const result = await parseApiResponse(response);
+      setFundamentalsData(result);
+      showMessage(`Removed ${tickerLabel(row)} from fundamentals.`);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      } else {
+        setFundamentalsError(error.message);
+      }
     }
   }
 
@@ -474,6 +568,7 @@ function App() {
   async function handleLogout() {
     await apiFetch("/api/logout", { method: "POST" }).catch(() => null);
     setData(null);
+    setFundamentalsData(null);
     setHistoryData(null);
     setUsersData(null);
     setTransactionsData(null);
@@ -489,6 +584,9 @@ function App() {
     }
     if (view !== "account" && sort.key === "account_weight") {
       setSort({ key: "current_value", direction: "desc" });
+    }
+    if (view === "fundamentals" && !fundamentalsData && !fundamentalsLoading) {
+      loadFundamentals();
     }
     if (view === "history" || (view === "account" && !historyData)) {
       loadHistory().catch((error) => {
@@ -582,6 +680,15 @@ function App() {
 
   function changeSort(key) {
     setSort((current) => {
+      if (current.key === key) {
+        return { key, direction: current.direction === "asc" ? "desc" : "asc" };
+      }
+      return { key, direction: "desc" };
+    });
+  }
+
+  function changeFundamentalsSort(key) {
+    setFundamentalsSort((current) => {
       if (current.key === key) {
         return { key, direction: current.direction === "asc" ? "desc" : "asc" };
       }
@@ -968,7 +1075,7 @@ function App() {
 
       <main>
         <section className="app-panel">
-          <PrimaryTabs onActivate={() => activateView("summary")} />
+          <PrimaryTabs activeView={activeView} onActivate={activateView} />
 
           {message && <div className={`message ${message.isError ? "error" : ""}`}>{message.text}</div>}
 
@@ -976,6 +1083,22 @@ function App() {
             <SummaryPage
               data={data}
               onActivate={activateView}
+            />
+          )}
+
+          {activeView === "fundamentals" && (
+            <FundamentalsPage
+              data={fundamentalsData}
+              loading={fundamentalsLoading}
+              error={fundamentalsError}
+              query={fundamentalsQuery}
+              sort={fundamentalsSort}
+              onQuery={setFundamentalsQuery}
+              onSort={changeFundamentalsSort}
+              onRefresh={() => loadFundamentals(true)}
+              onAddStock={handleAddFundamentalsStock}
+              onRemoveStock={handleRemoveFundamentalsStock}
+              onOpenStock={openStock}
             />
           )}
 
@@ -1205,11 +1328,16 @@ function HoldingsImportPage({ accounts, fileLabel, onFileChange, onSubmit }) {
   );
 }
 
-function PrimaryTabs({ onActivate }) {
+function PrimaryTabs({ activeView, onActivate }) {
+  const portfolioActive = activeView !== "fundamentals";
+
   return (
     <div className="tabs primary-tabs" role="tablist" aria-label="Investment sections">
-      <button className="tab active" onClick={onActivate}>
+      <button className={`tab ${portfolioActive ? "active" : ""}`} type="button" onClick={() => onActivate("summary")}>
         Portfolio
+      </button>
+      <button className={`tab ${activeView === "fundamentals" ? "active" : ""}`} type="button" onClick={() => onActivate("fundamentals")}>
+        Fundamentals
       </button>
     </div>
   );
@@ -1221,6 +1349,37 @@ function TradeIcon() {
       <path d="M7 7h10l-3-3" />
       <path d="M17 17H7l3 3" />
       <path d="M17 7 7 17" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M6 6l1 18h10l1-18" />
+      <path d="M10 11v7" />
+      <path d="M14 11v7" />
+    </svg>
+  );
+}
+
+function OwnedStatusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5 9.5V21h14V9.5" />
+      <path d="M9 21v-7h6v7" />
+    </svg>
+  );
+}
+
+function WatchedStatusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }
@@ -1320,6 +1479,200 @@ function SummaryPage({ data, onActivate }) {
         <AccountSummaryTable accounts={data.accounts} incomeByAccount={incomeByAccount} onActivate={onActivate} />
       </section>
       <PriceUpdateFooter status={data.price_refresh} />
+    </section>
+  );
+}
+
+function FundamentalsPage({
+  data,
+  loading,
+  error,
+  query,
+  sort,
+  onQuery,
+  onSort,
+  onRefresh,
+  onAddStock,
+  onRemoveStock,
+  onOpenStock,
+}) {
+  const [ownershipFilter, setOwnershipFilter] = useState("all");
+  const filteredRows = useMemo(
+    () =>
+      (data?.rows || []).filter((row) => {
+        if (ownershipFilter === "owned") return row.owned;
+        if (ownershipFilter === "watched") return row.watchlist;
+        return true;
+      }),
+    [data, ownershipFilter]
+  );
+  const rows = useMemo(() => sortedFundamentals(filteredRows, query, sort), [filteredRows, query, sort]);
+  const headers = [
+    ["symbol", "Ticker"],
+    ["description", "Company"],
+    ["current_price", "Price", "numeric"],
+    ["fifty_two_week_high", "52W High", "numeric"],
+    ["fifty_two_week_low", "52W Low", "numeric"],
+    ["price_position_52w_pct", "%", "numeric"],
+    ["eps_current", "EPS", "numeric"],
+    ["eps_recent", "Recent EPS", "numeric"],
+    ["eps_avg_10y", "10Y Avg EPS", "numeric"],
+    ["pe_ratio", "PE", "numeric"],
+    ["book_value_per_share", "Book / Share", "numeric"],
+    ["graham_price", "Graham Price", "numeric"],
+    ["graham_delta_pct", "Graham Delta", "numeric"],
+    ["dividend_yield_pct", "Div Yield", "numeric"],
+    ["five_year_dividend_yield_pct", "5Y Div Yield", "numeric"],
+    ["actions", "", "action-column", false],
+    ["position_status", "Status", "status-column"],
+  ];
+
+  return (
+    <section className="view active">
+      <section className="section-panel">
+        <div className="panel-heading fundamentals-heading">
+          <h2>Fundamentals</h2>
+          <div className="header-actions">
+            {data?.fetched_at ? <span>{formatDate(data.fetched_at)}</span> : null}
+            <button className="quiet-button" type="button" onClick={onRefresh} disabled={loading}>
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <details className="fundamentals-add-section">
+          <summary>Add stocks</summary>
+          <form className="fundamentals-add-form" onSubmit={onAddStock}>
+            <label>
+              <span>Symbol</span>
+              <input name="symbol" type="text" autoComplete="off" required />
+            </label>
+            <label>
+              <span>Market</span>
+              <select name="market" defaultValue="CDN">
+                <option value="CDN">Canada</option>
+                <option value="US">US</option>
+              </select>
+            </label>
+            <label>
+              <span>Name</span>
+              <input name="description" type="text" autoComplete="off" />
+            </label>
+            <button type="submit" disabled={loading}>
+              Add
+            </button>
+          </form>
+        </details>
+
+        <TableToolbar value={query} onChange={onQuery} count={rows.length} countLabel="stocks" placeholder="Filter stocks">
+          <fieldset className="fundamentals-filter" aria-label="Stock ownership filter">
+            {[
+              ["all", "All"],
+              ["owned", "Owned"],
+              ["watched", "Watched"],
+            ].map(([value, label]) => (
+              <label key={value}>
+                <input
+                  type="radio"
+                  name="fundamentals-filter"
+                  value={value}
+                  checked={ownershipFilter === value}
+                  onChange={() => setOwnershipFilter(value)}
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </fieldset>
+        </TableToolbar>
+        {error ? <div className="message error">{error}</div> : null}
+
+        <div className="table-wrap fundamentals-table-wrap">
+          <table className="fundamentals-table">
+            <thead>
+              <tr>
+                {headers.map(([key, label, className, sortable = true]) => (
+                  <th
+                    key={key}
+                    className={`${className || ""}${sortable ? " sortable-header" : ""}`}
+                    onClick={sortable ? () => onSort(key) : undefined}
+                  >
+                    {label}
+                    {sortable && sort.key === key ? (sort.direction === "asc" ? " ^" : " v") : ""}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading && !data ? (
+                <tr>
+                  <td className="empty-state" colSpan={headers.length}>
+                    Loading fundamentals...
+                  </td>
+                </tr>
+              ) : rows.length ? (
+                rows.map((row) => (
+                  <tr key={row.yahoo_symbol || `${row.symbol}-${row.market}`}>
+                    <td>
+                      <button className="symbol-link" type="button" onClick={() => onOpenStock(row)}>
+                        {tickerLabel(row)}
+                      </button>
+                      <div className="row-sub">{row.currency}</div>
+                    </td>
+                    <td>
+                      <div className="description" title={row.description}>
+                        {row.description || row.symbol}
+                      </div>
+                      {row.error || row.eps_error ? <div className="row-sub">Partial data</div> : null}
+                    </td>
+                    <td className="numeric">{formatMaybeCurrency(row.current_price, row.currency)}</td>
+                    <td className="numeric">{formatMaybeCurrency(row.fifty_two_week_high, row.currency)}</td>
+                    <td className="numeric">{formatMaybeCurrency(row.fifty_two_week_low, row.currency)}</td>
+                    <td className="numeric">{formatPercent(row.price_position_52w_pct)}</td>
+                    <td className="numeric">{formatRatio(row.eps_current)}</td>
+                    <td className="numeric">{formatRatio(row.eps_recent)}</td>
+                    <td className="numeric">{formatRatio(row.eps_avg_10y)}</td>
+                    <td className="numeric">{formatRatio(row.pe_ratio)}</td>
+                    <td className="numeric">{formatMaybeCurrency(row.book_value_per_share, row.currency)}</td>
+                    <td className="numeric">{formatMaybeCurrency(row.graham_price, row.currency)}</td>
+                    <td className="numeric">{formatPercent(row.graham_delta_pct)}</td>
+                    <td className="numeric">{formatPercent(row.dividend_yield_pct)}</td>
+                    <td className="numeric">{formatPercent(row.five_year_dividend_yield_pct)}</td>
+                    <td className="action-cell">
+                      {row.watchlist ? (
+                        <button
+                          className="row-action-button"
+                          type="button"
+                          title={`Remove ${tickerLabel(row)}`}
+                          aria-label={`Remove ${tickerLabel(row)}`}
+                          onClick={() => onRemoveStock(row)}
+                        >
+                          <TrashIcon />
+                        </button>
+                      ) : null}
+                    </td>
+                    <td className="status-cell">
+                      <span
+                        className={`status-icon ${row.owned ? "owned" : "watchlist"}`}
+                        title={row.owned ? "Owned" : "Watched"}
+                        role="img"
+                        aria-label={row.owned ? "Owned" : "Watched"}
+                      >
+                        {row.owned ? <OwnedStatusIcon /> : <WatchedStatusIcon />}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td className="empty-state" colSpan={headers.length}>
+                    No stocks found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </section>
   );
 }
@@ -3294,13 +3647,15 @@ function CombinedAllocation({ allocation }) {
   );
 }
 
-function TableToolbar({ value, onChange, count, placeholder, children }) {
+function TableToolbar({ value, onChange, count, placeholder, children, countLabel = "holdings" }) {
   return (
     <div className="table-toolbar">
       <input type="search" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
       <div className="table-toolbar-meta">
         {children}
-        <span>{count} holdings</span>
+        <span>
+          {count} {countLabel}
+        </span>
       </div>
     </div>
   );
@@ -3549,6 +3904,35 @@ function sortedHoldings(holdings, queryText, sort) {
 
     if (typeof aValue === "number" || typeof bValue === "number") {
       return ((Number(aValue) || 0) - (Number(bValue) || 0)) * direction;
+    }
+
+    return String(aValue || "").localeCompare(String(bValue || "")) * direction;
+  });
+}
+
+function sortedFundamentals(rows, queryText, sort) {
+  const query = queryText.trim().toLowerCase();
+  const filtered = rows.filter((row) => {
+    if (!query) return true;
+    return [row.symbol, row.yahoo_symbol, row.description, row.market, row.currency]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
+  });
+
+  return [...filtered].sort((a, b) => {
+    const aValue = a[sort.key];
+    const bValue = b[sort.key];
+    const direction = sort.direction === "asc" ? 1 : -1;
+    const aMissing = aValue === null || aValue === undefined || Number.isNaN(Number(aValue));
+    const bMissing = bValue === null || bValue === undefined || Number.isNaN(Number(bValue));
+
+    if (typeof aValue === "number" || typeof bValue === "number") {
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+      return (Number(aValue) - Number(bValue)) * direction;
     }
 
     return String(aValue || "").localeCompare(String(bValue || "")) * direction;
