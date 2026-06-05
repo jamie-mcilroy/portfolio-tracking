@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+RESOURCE_DIR = BASE_DIR / "resources"
 IMPORT_DIR = DATA_DIR / "imports"
 DB_PATH = DATA_DIR / "portfolio.db"
 STATIC_DIR = BASE_DIR / "static"
@@ -38,6 +39,10 @@ PRICE_REFRESH_LOCK = threading.Lock()
 PRICE_REFRESH_STALE_AFTER_SECONDS = 30 * 60
 YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 20
 EPS_HISTORY_YEARS = 10
+EPS_PIVOT_CSV_PATHS = (
+    DATA_DIR / "eps_10y_pivot.csv",
+    RESOURCE_DIR / "eps_10y_pivot.csv",
+)
 ALPHAQUERY_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -3840,7 +3845,7 @@ def selected_eps_years(num_years=EPS_HISTORY_YEARS):
     return list(range(end_year - num_years + 1, end_year + 1))
 
 
-def build_yearly_eps_series(symbol, market, num_years=EPS_HISTORY_YEARS):
+def build_yearly_eps_series_from_alphaquery(symbol, market, num_years=EPS_HISTORY_YEARS):
     html_text = fetch_earnings_history_page(symbol, market)
     rows = parse_eps_table(html_text)
     years = selected_eps_years(num_years)
@@ -3851,6 +3856,112 @@ def build_yearly_eps_series(symbol, market, num_years=EPS_HISTORY_YEARS):
         if year in selected:
             totals[year] = totals.get(year, 0.0) + row["actual_eps"]
     return {year: round(value, 2) for year, value in sorted(totals.items())}
+
+
+def normalize_eps_lookup_symbol(symbol):
+    text = str(symbol or "").strip().upper()
+    if text.startswith("T."):
+        text = text[2:]
+    if text.endswith(".TO"):
+        text = text[:-3]
+    return text.replace("-", ".")
+
+
+def build_yearly_eps_series_from_csv(symbol, market, num_years=EPS_HISTORY_YEARS):
+    target_symbol = normalize_eps_lookup_symbol(symbol)
+    if not target_symbol:
+        return {}
+
+    years = selected_eps_years(num_years)
+    for path in EPS_PIVOT_CSV_PATHS:
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                if normalize_eps_lookup_symbol(row.get("Symbol")) != target_symbol:
+                    continue
+                yearly_eps = {}
+                for year in years:
+                    value = parse_eps_value(row.get(str(year)))
+                    if value is not None:
+                        yearly_eps[year] = value
+                return yearly_eps
+    return {}
+
+
+def yfinance_eps_report_year(timestamp):
+    if hasattr(timestamp, "to_pydatetime"):
+        timestamp = timestamp.to_pydatetime()
+    elif isinstance(timestamp, str):
+        parsed = parse_iso_day(timestamp)
+        if parsed is None:
+            return None
+        return parsed.year
+
+    month = getattr(timestamp, "month", None)
+    year = getattr(timestamp, "year", None)
+    if not month or not year:
+        return None
+    return year - 1 if month <= 3 else year
+
+
+def build_yearly_eps_series_from_yfinance(symbol, market, num_years=EPS_HISTORY_YEARS):
+    import yfinance as yf
+
+    ticker = yahoo_symbol_for(symbol, market)
+    if not ticker:
+        return {}
+
+    years = selected_eps_years(num_years)
+    selected = set(years)
+    totals = {}
+    df = yf.Ticker(ticker).get_earnings_dates(limit=max(64, (num_years + 3) * 4))
+    if df is None or getattr(df, "empty", True):
+        return {}
+
+    reported_eps_column = next(
+        (column for column in df.columns if str(column).strip().lower() == "reported eps"),
+        None,
+    )
+    if reported_eps_column is None:
+        return {}
+
+    for timestamp, row in df.iterrows():
+        eps = finite_float(row.get(reported_eps_column))
+        year = yfinance_eps_report_year(timestamp)
+        if eps is not None and year in selected:
+            totals[year] = totals.get(year, 0.0) + eps
+
+    return {year: round(value, 2) for year, value in sorted(totals.items())}
+
+
+def build_yearly_eps_series_with_source(symbol, market, num_years=EPS_HISTORY_YEARS):
+    source_builders = (
+        ("alphaquery", build_yearly_eps_series_from_alphaquery),
+        ("eps_csv", build_yearly_eps_series_from_csv),
+        ("yfinance_earnings_dates", build_yearly_eps_series_from_yfinance),
+    )
+    errors = []
+    for source, builder in source_builders:
+        try:
+            years = builder(symbol, market, num_years)
+        except Exception as exc:
+            errors.append(f"{source}: {exc}")
+            continue
+        if years:
+            return years, source, None
+
+    error = "; ".join(errors)
+    if error:
+        error = f"No EPS data available. {error}"
+    else:
+        error = "No EPS data available."
+    return {}, "none", error
+
+
+def build_yearly_eps_series(symbol, market, num_years=EPS_HISTORY_YEARS):
+    years, _source, _error = build_yearly_eps_series_with_source(symbol, market, num_years)
+    return years
 
 
 def stock_eps_meta(conn, yahoo_symbol):
@@ -3888,9 +3999,9 @@ def refresh_stock_eps_history(symbol, market):
 
     fetched_at = utc_now()
     try:
-        years = build_yearly_eps_series(clean_symbol, clean_market, EPS_HISTORY_YEARS)
+        years, source, source_error = build_yearly_eps_series_with_source(clean_symbol, clean_market, EPS_HISTORY_YEARS)
         status = "ok" if years else "empty"
-        error = None if years else "No EPS data table found."
+        error = None if years else source_error
 
         with get_connection() as conn:
             conn.execute("DELETE FROM stock_eps_history WHERE yahoo_symbol = ?", (yahoo_symbol,))
@@ -3903,7 +4014,7 @@ def refresh_stock_eps_history(symbol, market):
                     fetched_at = excluded.fetched_at,
                     source = excluded.source
                 """,
-                [(yahoo_symbol, year, eps, fetched_at, "alphaquery") for year, eps in years.items()],
+                [(yahoo_symbol, year, eps, fetched_at, source) for year, eps in years.items()],
             )
             conn.execute(
                 """
