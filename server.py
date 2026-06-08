@@ -508,6 +508,9 @@ def init_db():
                 currency TEXT NOT NULL DEFAULT 'CAD',
                 eps_current REAL,
                 pe_ratio REAL,
+                price_to_sales_ratio REAL,
+                free_cash_flow_yield_pct REAL,
+                net_debt_to_ebitda_ratio REAL,
                 book_value_per_share REAL,
                 fifty_two_week_high REAL,
                 fifty_two_week_low REAL,
@@ -625,6 +628,9 @@ def init_db():
         fundamentals_columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_fundamentals)").fetchall()}
         fundamentals_column_defs = {
             "eps_current": "REAL",
+            "price_to_sales_ratio": "REAL",
+            "free_cash_flow_yield_pct": "REAL",
+            "net_debt_to_ebitda_ratio": "REAL",
         }
         for column, definition in fundamentals_column_defs.items():
             if column not in fundamentals_columns:
@@ -4454,6 +4460,23 @@ def refresh_stock_fundamentals(symbol, market):
         currency = str(info.get("currency") or info.get("financialCurrency") or stock_currency_for(clean_market)).upper()
         eps_current = info_float(info, "trailingEps", "forwardEps")
         pe_ratio = info_float(info, "trailingPE", "forwardPE")
+        price_to_sales_ratio = info_float(info, "priceToSalesTrailing12Months")
+        free_cash_flow = info_float(info, "freeCashflow", "freeCashFlow")
+        market_cap = info_float(info, "marketCap")
+        free_cash_flow_yield_pct = (
+            (free_cash_flow / market_cap) * 100.0
+            if free_cash_flow is not None and market_cap is not None and market_cap > 0
+            else None
+        )
+        net_debt = info_float(info, "netDebt")
+        if net_debt is None:
+            total_debt = info_float(info, "totalDebt")
+            total_cash = info_float(info, "totalCash")
+            net_debt = total_debt - total_cash if total_debt is not None and total_cash is not None else None
+        ebitda = info_float(info, "ebitda")
+        net_debt_to_ebitda_ratio = (
+            net_debt / ebitda if net_debt is not None and ebitda is not None and ebitda > 0 else None
+        )
         book_value_per_share = info_float(info, "bookValue")
         fifty_two_week_high = info_float(info, "fiftyTwoWeekHigh")
         fifty_two_week_low = info_float(info, "fiftyTwoWeekLow")
@@ -4462,16 +4485,19 @@ def refresh_stock_fundamentals(symbol, market):
             conn.execute(
                 """
                 INSERT INTO stock_fundamentals (
-                    yahoo_symbol, symbol, market, currency, eps_current, pe_ratio, book_value_per_share,
+                    yahoo_symbol, symbol, market, currency, eps_current, pe_ratio, price_to_sales_ratio, free_cash_flow_yield_pct, net_debt_to_ebitda_ratio, book_value_per_share,
                     fifty_two_week_high, fifty_two_week_low, fetched_at, status, error
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(yahoo_symbol) DO UPDATE SET
                     symbol = excluded.symbol,
                     market = excluded.market,
                     currency = excluded.currency,
                     eps_current = excluded.eps_current,
                     pe_ratio = excluded.pe_ratio,
+                    price_to_sales_ratio = excluded.price_to_sales_ratio,
+                    free_cash_flow_yield_pct = excluded.free_cash_flow_yield_pct,
+                    net_debt_to_ebitda_ratio = excluded.net_debt_to_ebitda_ratio,
                     book_value_per_share = excluded.book_value_per_share,
                     fifty_two_week_high = excluded.fifty_two_week_high,
                     fifty_two_week_low = excluded.fifty_two_week_low,
@@ -4486,6 +4512,9 @@ def refresh_stock_fundamentals(symbol, market):
                     currency,
                     eps_current,
                     pe_ratio,
+                    price_to_sales_ratio,
+                    free_cash_flow_yield_pct,
+                    net_debt_to_ebitda_ratio,
                     book_value_per_share,
                     fifty_two_week_high,
                     fifty_two_week_low,
@@ -5490,6 +5519,9 @@ def get_fundamentals(refresh=False):
                 "eps_avg_10y": eps_avg_10y,
                 "eps_history": {str(year): eps_history.get(year) for year in eps_years},
                 "pe_ratio": fundamentals["pe_ratio"] if fundamentals else None,
+                "price_to_sales_ratio": fundamentals["price_to_sales_ratio"] if fundamentals else None,
+                "free_cash_flow_yield_pct": fundamentals["free_cash_flow_yield_pct"] if fundamentals else None,
+                "net_debt_to_ebitda_ratio": fundamentals["net_debt_to_ebitda_ratio"] if fundamentals else None,
                 "book_value_per_share": book_value_per_share,
                 "graham_price": graham_price,
                 "graham_delta_pct": graham_delta_pct,

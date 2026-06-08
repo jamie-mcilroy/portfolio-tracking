@@ -99,6 +99,23 @@ function formatMaybeCurrency(value, currency = "CAD") {
   return formatCurrency(value, currency);
 }
 
+function formatCompactCurrencyOverThousand(value, currency = "CAD") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  const amount = Number(value);
+  if (Math.abs(amount) <= 1000) {
+    return formatCurrency(amount, currency);
+  }
+  return new Intl.NumberFormat("en-CA", {
+    style: "currency",
+    currency: currency || "CAD",
+    notation: "compact",
+    compactDisplay: "short",
+    maximumFractionDigits: 1,
+  }).format(amount);
+}
+
 function formatPercent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "n/a";
@@ -1518,6 +1535,9 @@ function FundamentalsPage({
     ["eps_recent", "Recent EPS", "numeric"],
     ["eps_avg_10y", "10Y Avg EPS", "numeric"],
     ["pe_ratio", "PE", "numeric"],
+    ["price_to_sales_ratio", "P/S", "numeric"],
+    ["free_cash_flow_yield_pct", "FCF Yield", "numeric"],
+    ["net_debt_to_ebitda_ratio", "Net Debt / EBITDA", "numeric"],
     ["book_value_per_share", "Book / Share", "numeric"],
     ["graham_price", "Graham Price", "numeric"],
     ["graham_delta_pct", "Graham Delta", "numeric"],
@@ -1632,8 +1652,11 @@ function FundamentalsPage({
                     <td className="numeric">{formatRatio(row.eps_recent)}</td>
                     <td className="numeric">{formatRatio(row.eps_avg_10y)}</td>
                     <td className="numeric">{formatRatio(row.pe_ratio)}</td>
-                    <td className="numeric">{formatMaybeCurrency(row.book_value_per_share, row.currency)}</td>
-                    <td className="numeric">{formatMaybeCurrency(row.graham_price, row.currency)}</td>
+                    <td className="numeric">{formatRatio(row.price_to_sales_ratio)}</td>
+                    <td className="numeric">{formatPercent(row.free_cash_flow_yield_pct)}</td>
+                    <td className="numeric">{formatRatio(row.net_debt_to_ebitda_ratio)}</td>
+                    <td className="numeric">{formatCompactCurrencyOverThousand(row.book_value_per_share, row.currency)}</td>
+                    <td className="numeric">{formatCompactCurrencyOverThousand(row.graham_price, row.currency)}</td>
                     <td className="numeric">{formatPercent(row.graham_delta_pct)}</td>
                     <td className="numeric">{formatPercent(row.dividend_yield_pct)}</td>
                     <td className="numeric">{formatPercent(row.five_year_dividend_yield_pct)}</td>
