@@ -614,6 +614,14 @@ def init_db():
             if column not in price_columns:
                 conn.execute(f"ALTER TABLE latest_prices ADD COLUMN {column} {definition}")
 
+        transaction_columns = {row[1] for row in conn.execute("PRAGMA table_info(portfolio_transactions)").fetchall()}
+        transaction_column_defs = {
+            "position_effect_json": "TEXT",
+        }
+        for column, definition in transaction_column_defs.items():
+            if column not in transaction_columns:
+                conn.execute(f"ALTER TABLE portfolio_transactions ADD COLUMN {column} {definition}")
+
         fundamentals_columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_fundamentals)").fetchall()}
         fundamentals_column_defs = {
             "eps_current": "REAL",
@@ -1731,8 +1739,372 @@ def save_transaction(
             net_amount,
             notes,
         )
+        position_effect = apply_transaction_position_effect(conn, transaction_id)
+        if position_effect:
+            set_transaction_position_effect(conn, transaction_id, position_effect)
 
-    return {"transaction": get_transaction(transaction_id), **list_transactions()}
+    return {"transaction": get_transaction(transaction_id), "position_effect": position_effect, **list_transactions()}
+
+
+def set_transaction_position_effect(conn, transaction_id, position_effect, now=None):
+    conn.execute(
+        """
+        UPDATE portfolio_transactions
+        SET position_effect_json = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            json.dumps(position_effect, sort_keys=True),
+            now or utc_now(),
+            transaction_id,
+        ),
+    )
+
+
+def purchase_transaction_values(transaction):
+    transaction_type = str(transaction.get("transaction_type") or "").strip().upper()
+    if transaction_type not in {"BUY", "DRIP"}:
+        return None
+
+    symbol = str(transaction.get("symbol") or "").strip().upper()
+    if not symbol:
+        return None
+
+    quantity = money_value(transaction.get("quantity"))
+    price = money_value(transaction.get("price"))
+    if quantity <= 0 or price <= 0:
+        return None
+
+    return {
+        "transaction_type": transaction_type,
+        "symbol": symbol,
+        "market": str(transaction.get("market") or "").strip().upper(),
+        "description": str(transaction.get("description") or "").strip(),
+        "currency": normalize_currency(transaction.get("currency")),
+        "quantity": quantity,
+        "price": price,
+        "book_value_delta": quantity * price,
+    }
+
+
+def apply_transaction_position_effect(conn, transaction_id):
+    transaction = conn.execute(
+        """
+        SELECT *
+        FROM portfolio_transactions
+        WHERE id = ? AND active = 1
+        """,
+        (transaction_id,),
+    ).fetchone()
+    if not transaction or transaction.get("position_effect_json"):
+        return None
+
+    values = purchase_transaction_values(transaction)
+    if not values:
+        return None
+
+    account_id = transaction["account_id"]
+    now = utc_now()
+
+    manual_holding = conn.execute(
+        """
+        SELECT *
+        FROM manual_holdings
+        WHERE account_id = ?
+            AND UPPER(COALESCE(symbol, '')) = ?
+            AND UPPER(COALESCE(market, '')) = ?
+            AND active = 1
+        LIMIT 1
+        """,
+        (account_id, values["symbol"], values["market"]),
+    ).fetchone()
+    if manual_holding:
+        old_quantity = money_value(manual_holding["quantity"])
+        old_average_cost = money_value(manual_holding["average_cost"])
+        old_book_value = old_quantity * old_average_cost
+        new_quantity = old_quantity + values["quantity"]
+        new_book_value = old_book_value + values["book_value_delta"]
+        new_average_cost = new_book_value / new_quantity if new_quantity else values["price"]
+        conn.execute(
+            """
+            UPDATE manual_holdings
+            SET quantity = ?, average_cost = ?, description = ?, updated_at = ?
+            WHERE id = ? AND account_id = ?
+            """,
+            (
+                new_quantity,
+                new_average_cost,
+                values["description"] or manual_holding["description"] or values["symbol"],
+                now,
+                manual_holding["id"],
+                account_id,
+            ),
+        )
+        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        return {
+            "version": 1,
+            "kind": "manual_holding",
+            "holding_id": manual_holding["id"],
+            "created": False,
+            "quantity_delta": values["quantity"],
+            "book_value_delta": values["book_value_delta"],
+            "symbol": values["symbol"],
+            "market": values["market"],
+            "currency": normalize_currency(manual_holding["currency"] or values["currency"]),
+        }
+
+    batch = latest_batch_for_account(conn, account_id)
+    holding = None
+    if batch:
+        holding = conn.execute(
+            """
+            SELECT *
+            FROM holdings
+            WHERE batch_id = ?
+                AND UPPER(COALESCE(symbol, '')) = ?
+                AND UPPER(COALESCE(market, '')) = ?
+            LIMIT 1
+            """,
+            (batch["id"], values["symbol"], values["market"]),
+        ).fetchone()
+
+    if holding and str(holding["asset_type"] or "").strip().lower() not in {"cash", "private fund"}:
+        old_quantity = money_value(holding["quantity"])
+        old_book_value = money_value(holding["book_value"])
+        closing_price = finite_float(holding["closing_price"])
+        if closing_price is None or closing_price <= 0:
+            closing_price = values["price"]
+        new_quantity = old_quantity + values["quantity"]
+        new_book_value = old_book_value + values["book_value_delta"]
+        new_average_cost = new_book_value / new_quantity if new_quantity else values["price"]
+        new_closing_value = new_quantity * closing_price
+        new_gain_loss = new_closing_value - new_book_value
+        new_gain_loss_pct = (new_gain_loss / new_book_value * 100.0) if new_book_value else None
+        conn.execute(
+            """
+            UPDATE holdings
+            SET
+                quantity = ?,
+                average_cost = ?,
+                closing_value = ?,
+                book_value = ?,
+                gain_loss = ?,
+                gain_loss_pct = ?
+            WHERE id = ? AND batch_id = ?
+            """,
+            (
+                new_quantity,
+                new_average_cost,
+                new_closing_value,
+                new_book_value,
+                new_gain_loss,
+                new_gain_loss_pct,
+                holding["id"],
+                batch["id"],
+            ),
+        )
+        sync_batch_totals_from_holdings_and_cash(conn, batch["id"])
+        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        return {
+            "version": 1,
+            "kind": "holding",
+            "holding_id": holding["id"],
+            "batch_id": batch["id"],
+            "created": False,
+            "quantity_delta": values["quantity"],
+            "book_value_delta": values["book_value_delta"],
+            "symbol": values["symbol"],
+            "market": values["market"],
+            "currency": normalize_currency(holding["currency"] or values["currency"]),
+        }
+
+    existing_manual_holding = conn.execute(
+        """
+        SELECT *
+        FROM manual_holdings
+        WHERE account_id = ?
+            AND UPPER(COALESCE(symbol, '')) = ?
+            AND UPPER(COALESCE(market, '')) = ?
+        LIMIT 1
+        """,
+        (account_id, values["symbol"], values["market"]),
+    ).fetchone()
+    conn.execute(
+        """
+        INSERT INTO manual_holdings (
+            account_id, asset_type, currency, symbol, market, description,
+            quantity, average_cost, manual_price, notes, active, created_at, updated_at
+        )
+        VALUES (?, 'Stock', ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?)
+        ON CONFLICT(account_id, symbol, market) DO UPDATE SET
+            asset_type = excluded.asset_type,
+            currency = excluded.currency,
+            description = excluded.description,
+            quantity = excluded.quantity,
+            average_cost = excluded.average_cost,
+            manual_price = excluded.manual_price,
+            notes = excluded.notes,
+            active = 1,
+            updated_at = excluded.updated_at
+        """,
+        (
+            account_id,
+            values["currency"],
+            values["symbol"],
+            values["market"],
+            values["description"] or values["symbol"],
+            values["quantity"],
+            values["price"],
+            f"Created from transaction {transaction_id}",
+            now,
+            now,
+        ),
+    )
+    manual_holding_id = conn.execute(
+        """
+        SELECT id
+        FROM manual_holdings
+        WHERE account_id = ?
+            AND UPPER(COALESCE(symbol, '')) = ?
+            AND UPPER(COALESCE(market, '')) = ?
+        LIMIT 1
+        """,
+        (account_id, values["symbol"], values["market"]),
+    ).fetchone()["id"]
+    conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+    return {
+        "version": 1,
+        "kind": "manual_holding",
+        "holding_id": manual_holding_id,
+        "created": not bool(existing_manual_holding and existing_manual_holding.get("active")),
+        "quantity_delta": values["quantity"],
+        "book_value_delta": values["book_value_delta"],
+        "symbol": values["symbol"],
+        "market": values["market"],
+        "currency": values["currency"],
+    }
+
+
+def parse_position_effect_json(value):
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or parsed.get("version") != 1:
+        return None
+    return parsed
+
+
+def revert_transaction_position_effect(conn, transaction):
+    effect = parse_position_effect_json(transaction.get("position_effect_json"))
+    if not effect:
+        return None
+
+    account_id = transaction["account_id"]
+    quantity_delta = money_value(effect.get("quantity_delta"))
+    book_value_delta = money_value(effect.get("book_value_delta"))
+    if quantity_delta <= 0:
+        return None
+
+    now = utc_now()
+    if effect.get("kind") == "manual_holding":
+        holding = conn.execute(
+            """
+            SELECT *
+            FROM manual_holdings
+            WHERE id = ? AND account_id = ?
+            """,
+            (effect.get("holding_id"), account_id),
+        ).fetchone()
+        if not holding:
+            return None
+
+        current_quantity = money_value(holding["quantity"])
+        current_average_cost = money_value(holding["average_cost"])
+        current_book_value = current_quantity * current_average_cost
+        new_quantity = current_quantity - quantity_delta
+        if new_quantity <= 0.000001:
+            conn.execute(
+                """
+                UPDATE manual_holdings
+                SET quantity = 0, average_cost = NULL, active = 0, updated_at = ?
+                WHERE id = ? AND account_id = ?
+                """,
+                (now, holding["id"], account_id),
+            )
+        else:
+            new_book_value = max(0.0, current_book_value - book_value_delta)
+            conn.execute(
+                """
+                UPDATE manual_holdings
+                SET quantity = ?, average_cost = ?, updated_at = ?
+                WHERE id = ? AND account_id = ?
+                """,
+                (
+                    new_quantity,
+                    new_book_value / new_quantity if new_quantity else None,
+                    now,
+                    holding["id"],
+                    account_id,
+                ),
+            )
+        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        return effect
+
+    if effect.get("kind") == "holding":
+        batch_id = int(effect.get("batch_id") or 0)
+        holding = conn.execute(
+            """
+            SELECT *
+            FROM holdings
+            WHERE id = ? AND batch_id = ?
+            """,
+            (effect.get("holding_id"), batch_id),
+        ).fetchone()
+        if not holding:
+            return None
+
+        current_quantity = money_value(holding["quantity"])
+        current_book_value = money_value(holding["book_value"])
+        closing_price = finite_float(holding["closing_price"])
+        if closing_price is None:
+            closing_price = money_value(holding["average_cost"])
+        new_quantity = max(0.0, current_quantity - quantity_delta)
+        new_book_value = max(0.0, current_book_value - book_value_delta)
+        new_average_cost = new_book_value / new_quantity if new_quantity else None
+        new_closing_value = new_quantity * (closing_price or 0.0)
+        new_gain_loss = new_closing_value - new_book_value
+        new_gain_loss_pct = (new_gain_loss / new_book_value * 100.0) if new_book_value else None
+        conn.execute(
+            """
+            UPDATE holdings
+            SET
+                quantity = ?,
+                average_cost = ?,
+                closing_value = ?,
+                book_value = ?,
+                gain_loss = ?,
+                gain_loss_pct = ?
+            WHERE id = ? AND batch_id = ?
+            """,
+            (
+                new_quantity,
+                new_average_cost,
+                new_closing_value,
+                new_book_value,
+                new_gain_loss,
+                new_gain_loss_pct,
+                holding["id"],
+                batch_id,
+            ),
+        )
+        sync_batch_totals_from_holdings_and_cash(conn, batch_id)
+        conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        return effect
+
+    return None
 
 
 def insert_portfolio_transaction(
@@ -1832,7 +2204,7 @@ def delete_transaction(transaction_id):
     with get_connection() as conn:
         transaction = conn.execute(
             """
-            SELECT id, account_id
+            SELECT id, account_id, position_effect_json
             FROM portfolio_transactions
             WHERE id = ? AND active = 1
             """,
@@ -1840,6 +2212,7 @@ def delete_transaction(transaction_id):
         ).fetchone()
         if not transaction:
             raise ValueError("Transaction not found.")
+        revert_transaction_position_effect(conn, transaction)
         conn.execute(
             """
             UPDATE portfolio_transactions
