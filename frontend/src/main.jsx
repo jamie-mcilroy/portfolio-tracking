@@ -1403,7 +1403,15 @@ function WatchedStatusIcon() {
 
 function TradeModal({ account, holding, onSubmit, onClose }) {
   const tradeCurrency = holding?.currency || account?.base_currency || "CAD";
-  const defaultPrice = Number(holding?.current_price ?? holding?.closing_price ?? holding?.average_cost ?? 0);
+  const defaultPrice = Number(
+    holding?.source_price ??
+      holding?.source_closing_price ??
+      holding?.source_manual_price ??
+      holding?.closing_price ??
+      holding?.current_price ??
+      holding?.average_cost ??
+      0
+  );
   const defaultPriceText = Number.isFinite(defaultPrice) && defaultPrice > 0 ? defaultPrice.toFixed(2) : "";
   const cashBalance = cashAmountForCurrency(account, tradeCurrency);
 
@@ -1428,7 +1436,7 @@ function TradeModal({ account, holding, onSubmit, onClose }) {
           </label>
           <label>
             <span>Shares</span>
-            <input name="shares" type="number" step="0.0001" min="0" required autoFocus />
+            <input name="shares" type="number" step="0.0001" required autoFocus />
           </label>
           <label>
             <span>Price</span>

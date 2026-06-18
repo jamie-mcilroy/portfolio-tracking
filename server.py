@@ -2011,7 +2011,7 @@ def revert_transaction_position_effect(conn, transaction):
     account_id = transaction["account_id"]
     quantity_delta = money_value(effect.get("quantity_delta"))
     book_value_delta = money_value(effect.get("book_value_delta"))
-    if quantity_delta <= 0:
+    if abs(quantity_delta) <= 0.000001:
         return None
 
     now = utc_now()
@@ -2045,7 +2045,7 @@ def revert_transaction_position_effect(conn, transaction):
             conn.execute(
                 """
                 UPDATE manual_holdings
-                SET quantity = ?, average_cost = ?, updated_at = ?
+                SET quantity = ?, average_cost = ?, active = 1, updated_at = ?
                 WHERE id = ? AND account_id = ?
                 """,
                 (
@@ -2057,6 +2057,7 @@ def revert_transaction_position_effect(conn, transaction):
                 ),
             )
         conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        revert_transaction_cash_effect(conn, account_id, effect, now)
         return effect
 
     if effect.get("kind") == "holding":
@@ -2108,9 +2109,30 @@ def revert_transaction_position_effect(conn, transaction):
         )
         sync_batch_totals_from_holdings_and_cash(conn, batch_id)
         conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
+        revert_transaction_cash_effect(conn, account_id, effect, now)
         return effect
 
     return None
+
+
+def revert_transaction_cash_effect(conn, account_id, effect, now):
+    cash_delta = finite_float(effect.get("cash_delta"))
+    if cash_delta is None or abs(cash_delta) <= 0.000001:
+        return None
+
+    cash_currency = normalize_currency(effect.get("cash_currency") or effect.get("currency"))
+    batch = latest_batch_for_account(conn, account_id)
+    cash_by_currency = {
+        item["currency"]: item["amount"]
+        for item in normalize_cash_balances(cash_balances_for_batch(conn, batch["id"]) if batch else [])
+    }
+    cash_by_currency[cash_currency] = cash_by_currency.get(cash_currency, 0.0) - cash_delta
+    return set_latest_cash_balances_for_account(
+        conn,
+        account_id,
+        [{"currency": currency, "amount": amount} for currency, amount in cash_by_currency.items()],
+        now,
+    )
 
 
 def insert_portfolio_transaction(
@@ -2428,16 +2450,20 @@ def apply_account_trade(
     clean_date = normalize_transaction_date(transaction_date)
     clean_shares = money_value(shares)
     clean_price = money_value(price)
-    if clean_shares <= 0:
-        raise ValueError("Shares must be greater than zero.")
+    if abs(clean_shares) <= 0.000001:
+        raise ValueError("Shares cannot be zero.")
     if clean_price <= 0:
         raise ValueError("Price must be greater than zero.")
 
     clean_symbol = str(symbol or "").strip().upper()
     clean_market = str(market or "").strip().upper()
-    trade_value = clean_shares * clean_price
+    trade_quantity = abs(clean_shares)
+    selling = clean_shares < 0
+    trade_value = trade_quantity * clean_price
     now = utc_now()
     drip_trade = bool(drip)
+    if drip_trade and selling:
+        raise ValueError("DRIP trades require positive shares.")
 
     with get_connection() as conn:
         account = conn.execute(
@@ -2508,53 +2534,78 @@ def apply_account_trade(
         trade_currency = normalize_currency(
             (manual_holding or holding).get("currency") or "CAD"
         )
+        cash_delta = 0.0
         if not drip_trade:
             cash_by_currency = {
                 item["currency"]: item["amount"]
                 for item in normalize_cash_balances(cash_balances_for_batch(conn, batch_id) if batch_id else [])
             }
             current_cash = cash_by_currency.get(trade_currency, 0.0)
-            if trade_value - current_cash > 0.005:
+            if selling:
+                cash_by_currency[trade_currency] = current_cash + trade_value
+                cash_delta = trade_value
+            elif trade_value - current_cash > 0.005:
                 raise ValueError(
                     f"Purchase amount {trade_currency} {trade_value:,.2f} exceeds "
                     f"{trade_currency} cash balance {current_cash:,.2f}."
                 )
-            cash_by_currency[trade_currency] = current_cash - trade_value
+            else:
+                cash_by_currency[trade_currency] = current_cash - trade_value
+                cash_delta = -trade_value
 
         if manual_holding:
             old_quantity = money_value(manual_holding["quantity"])
+            if selling and trade_quantity - old_quantity > 0.000001:
+                raise ValueError(f"Sell quantity {trade_quantity:g} exceeds current shares {old_quantity:g}.")
             old_average_cost = money_value(manual_holding["average_cost"])
             old_book_value = old_quantity * old_average_cost
             new_quantity = old_quantity + clean_shares
-            new_book_value = old_book_value + trade_value
-            new_average_cost = new_book_value / new_quantity if new_quantity else clean_price
+            if new_quantity <= 0.000001:
+                new_quantity = 0.0
+            book_value_delta = -(old_average_cost * trade_quantity) if selling else trade_value
+            new_book_value = max(0.0, old_book_value + book_value_delta)
+            new_average_cost = (
+                new_book_value / new_quantity
+                if new_quantity
+                else None
+            )
             clean_symbol = str(manual_holding["symbol"] or "").strip().upper()
             clean_market = str(manual_holding["market"] or "").strip().upper()
             clean_description = str(description or manual_holding["description"] or clean_symbol).strip()
             conn.execute(
                 """
                 UPDATE manual_holdings
-                SET quantity = ?, average_cost = ?, description = ?, updated_at = ?
+                SET quantity = ?, average_cost = ?, description = ?, active = ?, updated_at = ?
                 WHERE id = ? AND account_id = ?
                 """,
                 (
                     new_quantity,
                     new_average_cost,
                     clean_description,
+                    1 if new_quantity else 0,
                     now,
                     manual_holding["id"],
                     account_id,
                 ),
             )
+            position_effect_kind = "manual_holding"
+            position_effect_holding_id = manual_holding["id"]
+            position_effect_batch_id = None
         else:
             old_quantity = money_value(holding["quantity"])
+            if selling and trade_quantity - old_quantity > 0.000001:
+                raise ValueError(f"Sell quantity {trade_quantity:g} exceeds current shares {old_quantity:g}.")
             old_book_value = money_value(holding["book_value"])
             closing_price = finite_float(holding["closing_price"])
             if closing_price is None or closing_price <= 0:
                 closing_price = clean_price
             new_quantity = old_quantity + clean_shares
-            new_book_value = old_book_value + trade_value
-            new_average_cost = new_book_value / new_quantity if new_quantity else clean_price
+            if new_quantity <= 0.000001:
+                new_quantity = 0.0
+            old_average_cost = old_book_value / old_quantity if old_quantity else money_value(holding["average_cost"])
+            book_value_delta = -(old_average_cost * trade_quantity) if selling else trade_value
+            new_book_value = max(0.0, old_book_value + book_value_delta)
+            new_average_cost = new_book_value / new_quantity if new_quantity else None
             new_closing_value = new_quantity * closing_price
             new_gain_loss = new_closing_value - new_book_value
             new_gain_loss_pct = (new_gain_loss / new_book_value * 100.0) if new_book_value else None
@@ -2584,6 +2635,9 @@ def apply_account_trade(
                     batch_id,
                 ),
             )
+            position_effect_kind = "holding"
+            position_effect_holding_id = holding["id"]
+            position_effect_batch_id = batch_id
 
         cash_result = None
         if not drip_trade:
@@ -2596,24 +2650,40 @@ def apply_account_trade(
         elif batch_id:
             sync_batch_totals_from_holdings_and_cash(conn, batch_id)
 
+        transaction_type = "DRIP" if drip_trade else ("SELL" if selling else "BUY")
         transaction_id = insert_portfolio_transaction(
             conn,
             account_id,
             clean_date,
-            "DRIP" if drip_trade else "BUY",
+            transaction_type,
             clean_symbol,
             clean_market,
             clean_description,
             trade_currency,
-            clean_shares,
+            trade_quantity,
             clean_price,
             None,
             trade_value,
             0.0,
             0.0,
-            0.0 if drip_trade else -abs(trade_value),
+            0.0 if drip_trade else (trade_value if selling else -abs(trade_value)),
             "DRIP - cash unchanged" if drip_trade else "",
         )
+        position_effect = {
+            "version": 1,
+            "kind": position_effect_kind,
+            "holding_id": position_effect_holding_id,
+            "quantity_delta": clean_shares,
+            "book_value_delta": book_value_delta,
+            "symbol": clean_symbol,
+            "market": clean_market,
+            "currency": trade_currency,
+            "cash_currency": trade_currency,
+            "cash_delta": cash_delta,
+        }
+        if position_effect_batch_id is not None:
+            position_effect["batch_id"] = position_effect_batch_id
+        set_transaction_position_effect(conn, transaction_id, position_effect, now)
         conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
 
     return {
@@ -2623,7 +2693,11 @@ def apply_account_trade(
         "message": (
             f"Recorded DRIP for {clean_shares:g} {clean_symbol}."
             if drip_trade
-            else f"Recorded purchase of {clean_shares:g} {clean_symbol}."
+            else (
+                f"Recorded sale of {trade_quantity:g} {clean_symbol}."
+                if selling
+                else f"Recorded purchase of {trade_quantity:g} {clean_symbol}."
+            )
         ),
     }
 
@@ -3353,6 +3427,7 @@ def active_price_targets():
                 WHERE holdings.batch_id IN ({latest_batch_filter_sql()})
                     AND COALESCE(holdings.symbol, '') != ''
                     AND UPPER(COALESCE(holdings.symbol, '')) != 'CASH'
+                    AND ABS(COALESCE(holdings.quantity, 0)) > 0.000001
                 UNION ALL
                 SELECT
                     manual_holdings.symbol,
@@ -3401,6 +3476,7 @@ def portfolio_needs_usd_cad():
             FROM holdings
             WHERE batch_id IN ({latest_batch_filter_sql()})
                 AND UPPER(currency) = 'USD'
+                AND ABS(COALESCE(quantity, 0)) > 0.000001
             LIMIT 1
             """
         ).fetchone()
@@ -5598,6 +5674,7 @@ def get_summary():
             JOIN import_batches ON import_batches.id = holdings.batch_id
             JOIN accounts ON accounts.id = import_batches.account_id
             WHERE holdings.batch_id IN ({latest_batch_filter_sql()})
+                AND ABS(COALESCE(holdings.quantity, 0)) > 0.000001
             ORDER BY holdings.closing_value DESC, holdings.symbol
             """
         ).fetchall()
