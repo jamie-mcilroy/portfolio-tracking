@@ -378,6 +378,16 @@ def init_db():
                 FOREIGN KEY (batch_id) REFERENCES import_batches(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS account_holding_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                holding_key TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (account_id, holding_key),
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS cash_balances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 batch_id INTEGER NOT NULL,
@@ -885,6 +895,23 @@ def normalize_transaction_type(value):
     if clean_type not in TRANSACTION_TYPES:
         raise ValueError("Unsupported transaction type.")
     return clean_type
+
+
+def normalize_holding_order_part(value, uppercase=True):
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text.upper() if uppercase else text.lower()
+
+
+def holding_order_key(holding):
+    return "|".join(
+        [
+            normalize_holding_order_part(holding.get("asset_type")),
+            normalize_holding_order_part(holding.get("currency") or "CAD"),
+            normalize_holding_order_part(holding.get("symbol")),
+            normalize_holding_order_part(holding.get("market")),
+            normalize_holding_order_part(holding.get("description"), uppercase=False),
+        ]
+    )
 
 
 def money_value(value):
@@ -1514,6 +1541,7 @@ def manual_holding_summary_rows(conn, usd_cad_rate=1.0):
         """
         SELECT
             manual_holdings.*,
+            accounts.id AS account_id,
             accounts.name AS account_name,
             accounts.account_entity AS account_entity
         FROM manual_holdings
@@ -1531,6 +1559,7 @@ def manual_holding_summary_rows(conn, usd_cad_rate=1.0):
                 "id": f"manual-{row['id']}",
                 "manual_holding_id": row["id"],
                 "batch_id": None,
+                "account_id": row["account_id"],
                 "asset_type": row["asset_type"] or "Stock",
                 "currency": normalize_currency(row["currency"]),
                 "symbol": str(row["symbol"] or "").strip().upper(),
@@ -2775,6 +2804,51 @@ def get_accounts():
         account["has_import"] = account["batch_id"] is not None
 
     return accounts
+
+
+def save_account_holding_order(account_id, holding_order):
+    init_db()
+    try:
+        clean_account_id = int(account_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Account not found.") from exc
+
+    ordered_keys = []
+    seen = set()
+    for key in holding_order or []:
+        clean_key = str(key or "").strip()
+        if not clean_key or clean_key in seen:
+            continue
+        ordered_keys.append(clean_key)
+        seen.add(clean_key)
+
+    now = utc_now()
+    with get_connection() as conn:
+        account = conn.execute("SELECT id FROM accounts WHERE id = ?", (clean_account_id,)).fetchone()
+        if not account:
+            raise ValueError("Account not found.")
+
+        conn.executemany(
+            """
+            INSERT INTO account_holding_orders (account_id, holding_key, sort_order, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(account_id, holding_key) DO UPDATE SET
+                sort_order = excluded.sort_order,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (clean_account_id, holding_key, index, now)
+                for index, holding_key in enumerate(ordered_keys)
+            ],
+        )
+
+    return {
+        "account_id": clean_account_id,
+        "orders": [
+            {"holding_key": holding_key, "sort_order": index}
+            for index, holding_key in enumerate(ordered_keys)
+        ],
+    }
 
 
 def totals_from_summaries(currency_summaries):
@@ -5666,6 +5740,7 @@ def get_summary():
             f"""
             SELECT
                 holdings.*,
+                accounts.id AS account_id,
                 accounts.name AS account_name,
                 accounts.account_entity AS account_entity,
                 import_batches.report_timestamp,
@@ -5675,7 +5750,7 @@ def get_summary():
             JOIN accounts ON accounts.id = import_batches.account_id
             WHERE holdings.batch_id IN ({latest_batch_filter_sql()})
                 AND ABS(COALESCE(holdings.quantity, 0)) > 0.000001
-            ORDER BY holdings.closing_value DESC, holdings.symbol
+            ORDER BY accounts.name, holdings.id
             """
         ).fetchall()
 
@@ -5701,6 +5776,7 @@ def get_summary():
         cash_rows = conn.execute(
             f"""
             SELECT
+                accounts.id AS account_id,
                 accounts.name AS account_name,
                 accounts.account_entity AS account_entity,
                 cash_balances.batch_id,
@@ -5741,6 +5817,12 @@ def get_summary():
             """
             SELECT *
             FROM latest_prices
+            """
+        ).fetchall()
+        order_rows = conn.execute(
+            """
+            SELECT account_id, holding_key, sort_order
+            FROM account_holding_orders
             """
         ).fetchall()
         usd_cad_rate = latest_usd_cad_rate_from_conn(conn)
@@ -5784,6 +5866,7 @@ def get_summary():
             {
                 "id": f"cash-{cash['batch_id']}-{cash['currency']}",
                 "batch_id": cash["batch_id"],
+                "account_id": cash["account_id"],
                 "asset_type": "Cash",
                 "currency": cash["currency"],
                 "symbol": "CASH",
@@ -5810,6 +5893,24 @@ def get_summary():
     holdings = holdings + manual_holdings
     security_count = len(holdings)
     holdings = holdings + cash_holdings
+    saved_order_by_key = {
+        (row["account_id"], row["holding_key"]): row["sort_order"]
+        for row in order_rows
+    }
+    next_fallback_order_by_account = {}
+    holding_key_counts = {}
+    for holding in holdings:
+        account_id = holding.get("account_id")
+        fallback_order = next_fallback_order_by_account.get(account_id, 0)
+        next_fallback_order_by_account[account_id] = fallback_order + 1
+        base_order_key = holding_order_key(holding)
+        duplicate_index = holding_key_counts.get((account_id, base_order_key), 0)
+        holding_key_counts[(account_id, base_order_key)] = duplicate_index + 1
+        order_key = base_order_key if duplicate_index == 0 else f"{base_order_key}|{duplicate_index + 1}"
+        saved_order = saved_order_by_key.get((account_id, order_key))
+        holding["holding_order_key"] = order_key
+        holding["statement_order"] = saved_order if saved_order is not None else 100000 + fallback_order
+        holding["statement_order_saved"] = saved_order is not None
     ensure_stock_analytics_cache_for_holdings(holdings)
     forward_dividends_by_symbol = stock_forward_dividend_map_for_holdings(holdings)
     price_by_symbol = {

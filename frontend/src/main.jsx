@@ -46,6 +46,7 @@ const dividendIncomeForecastDates = [
   ["2032", "2032-12-02"],
   ["2037", "2037-12-02"],
 ];
+const STATEMENT_ORDER_SORT_KEY = "statement_order";
 const accountDisplayOrder = [
   ["jamie rrsp", 0],
   ["michelle rrsp", 1],
@@ -599,8 +600,11 @@ function App() {
       setActiveStock(null);
       setStockError("");
     }
-    if (view !== "account" && sort.key === "account_weight") {
+    if (view !== "account" && [STATEMENT_ORDER_SORT_KEY, "account_weight"].includes(sort.key)) {
       setSort({ key: "current_value", direction: "desc" });
+    }
+    if (view === "account") {
+      setSort({ key: STATEMENT_ORDER_SORT_KEY, direction: "asc" });
     }
     if (view === "fundamentals" && !fundamentalsData && !fundamentalsLoading) {
       loadFundamentals();
@@ -697,6 +701,9 @@ function App() {
 
   function changeSort(key) {
     setSort((current) => {
+      if (key === STATEMENT_ORDER_SORT_KEY) {
+        return { key, direction: "asc" };
+      }
       if (current.key === key) {
         return { key, direction: current.direction === "asc" ? "desc" : "asc" };
       }
@@ -1040,6 +1047,51 @@ function App() {
     }
   }
 
+  async function handleReorderHoldings(account, orderedHoldings) {
+    const holdingOrder = orderedHoldings.map((holding) => holding.holding_order_key).filter(Boolean);
+    if (!account?.id || !holdingOrder.length) {
+      return;
+    }
+
+    try {
+      const response = await apiFetch(`/api/accounts/${account.id}/holdings/order`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ holding_order: holdingOrder }),
+      });
+      const result = await parseApiResponse(response);
+      const nextOrderByKey = new Map(
+        (result.orders || []).map((item) => [item.holding_key, Number(item.sort_order)])
+      );
+      setData((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          holdings: current.holdings.map((holding) => {
+            if (Number(holding.account_id) !== Number(account.id)) {
+              return holding;
+            }
+            const nextOrder = nextOrderByKey.get(holding.holding_order_key);
+            if (nextOrder === undefined) {
+              return holding;
+            }
+            return {
+              ...holding,
+              statement_order: nextOrder,
+              statement_order_saved: true,
+            };
+          }),
+        };
+      });
+      showMessage("Saved statement order.");
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    }
+  }
+
   const activeAccount =
     (data?.accounts || []).find((account) => account.id === activeAccountId) ||
     (data?.all_accounts || []).find((account) => account.id === activeAccountId) ||
@@ -1133,6 +1185,7 @@ function App() {
               onOpenStock={openStock}
               onOpenTrade={(holding) => setTradeDraft({ account: activeAccount, holding })}
               onOpenCash={() => setCashDraft({ account: activeAccount })}
+              onReorderHoldings={handleReorderHoldings}
               privateFundData={privateFundData[activeAccount.id]}
               onLoadPrivateFundMarks={loadPrivateFundMarks}
               onSavePrivateFundMark={(event) => handleSavePrivateFundMark(activeAccount.id, event)}
@@ -1366,6 +1419,19 @@ function TradeIcon() {
       <path d="M7 7h10l-3-3" />
       <path d="M17 17H7l3 3" />
       <path d="M17 7 7 17" />
+    </svg>
+  );
+}
+
+function DragHandleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <circle cx="9" cy="6" r="1" />
+      <circle cx="9" cy="12" r="1" />
+      <circle cx="9" cy="18" r="1" />
+      <circle cx="15" cy="6" r="1" />
+      <circle cx="15" cy="12" r="1" />
+      <circle cx="15" cy="18" r="1" />
     </svg>
   );
 }
@@ -2150,6 +2216,19 @@ function PrivateFundPanel({ data, account, onSubmit }) {
   );
 }
 
+function reorderHoldingsByDrop(holdings, draggedKey, targetKey) {
+  const fromIndex = holdings.findIndex((holding) => holding.holding_order_key === draggedKey);
+  const toIndex = holdings.findIndex((holding) => holding.holding_order_key === targetKey);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+    return holdings;
+  }
+
+  const nextHoldings = [...holdings];
+  const [draggedHolding] = nextHoldings.splice(fromIndex, 1);
+  nextHoldings.splice(toIndex, 0, draggedHolding);
+  return nextHoldings;
+}
+
 function AccountPage({
   account,
   accounts,
@@ -2163,6 +2242,7 @@ function AccountPage({
   onOpenStock,
   onOpenTrade,
   onOpenCash,
+  onReorderHoldings,
   privateFundData,
   onLoadPrivateFundMarks,
   onSavePrivateFundMark,
@@ -2192,6 +2272,7 @@ function AccountPage({
     () => sortedHoldings(accountHoldings, query, sort),
     [accountHoldings, query, sort]
   );
+  const canReorderHoldings = sort.key === STATEMENT_ORDER_SORT_KEY && sort.direction === "asc" && !query.trim();
   const monthlyPivot = useMemo(
     () => buildAccountMonthlyPivot(history?.snapshots || [], account.id),
     [history, account.id]
@@ -2245,6 +2326,13 @@ function AccountPage({
             />
             <span>Show de-risk</span>
           </label>
+          <button
+            className={`quiet-button statement-order-button ${sort.key === STATEMENT_ORDER_SORT_KEY ? "active" : ""}`}
+            type="button"
+            onClick={() => onSort(STATEMENT_ORDER_SORT_KEY)}
+          >
+            Statement order
+          </button>
         </TableToolbar>
         <HoldingsTable
           holdings={sortedAccountHoldings}
@@ -2256,6 +2344,13 @@ function AccountPage({
           onSort={onSort}
           onOpenStock={onOpenStock}
           onOpenTrade={onOpenTrade}
+          canReorder={canReorderHoldings}
+          onReorder={(draggedKey, targetKey) => {
+            const reordered = reorderHoldingsByDrop(sortedAccountHoldings, draggedKey, targetKey);
+            if (reordered !== sortedAccountHoldings) {
+              onReorderHoldings(account, reordered);
+            }
+          }}
         />
       </section>
 
@@ -3692,8 +3787,23 @@ function TableToolbar({ value, onChange, count, placeholder, children, countLabe
   );
 }
 
-function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, showDerisk, onSort, onOpenStock, onOpenTrade }) {
+function HoldingsTable({
+  holdings,
+  accountName,
+  sort,
+  weightKey,
+  showAccount,
+  showDerisk,
+  onSort,
+  onOpenStock,
+  onOpenTrade,
+  canReorder = false,
+  onReorder,
+}) {
+  const [draggedKey, setDraggedKey] = useState("");
+  const [dragOverKey, setDragOverKey] = useState("");
   const baseHeaders = [
+    ["drag", "", "drag-column", false],
     ["trade", "", "action-column", false],
     ["description", "Company"],
     ["account_weight", "Alloc", "numeric"],
@@ -3755,6 +3865,30 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
     }
   );
 
+  function startDrag(event, holding) {
+    if (!canReorder || !holding.holding_order_key) {
+      event.preventDefault();
+      return;
+    }
+    setDraggedKey(holding.holding_order_key);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", holding.holding_order_key);
+  }
+
+  function dropHolding(event, targetHolding) {
+    if (!canReorder || !onReorder || !targetHolding.holding_order_key) {
+      return;
+    }
+    event.preventDefault();
+    const sourceKey = event.dataTransfer.getData("text/plain") || draggedKey;
+    setDraggedKey("");
+    setDragOverKey("");
+    if (!sourceKey || sourceKey === targetHolding.holding_order_key) {
+      return;
+    }
+    onReorder(sourceKey, targetHolding.holding_order_key);
+  }
+
   return (
     <div className="table-wrap account-holdings-wrap">
       <table className={`account-holdings-table ${showDerisk ? "show-derisk" : ""}`}>
@@ -3782,8 +3916,44 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
           {holdings.length ? (
             holdings.map((holding) => {
               const derisk = deriskForHolding(holding);
+              const orderKey = holding.holding_order_key || `${holding.id}-${holding.account_name}`;
               return (
-                <tr key={`${holding.id}-${holding.account_name}`}>
+                <tr
+                  key={`${holding.id}-${holding.account_name}`}
+                  className={`${canReorder ? "reorderable-row" : ""}${draggedKey === orderKey ? " dragging" : ""}${
+                    dragOverKey === orderKey ? " drag-over" : ""
+                  }`}
+                  onDragOver={
+                    canReorder
+                      ? (event) => {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                          setDragOverKey(orderKey);
+                        }
+                      : undefined
+                  }
+                  onDragLeave={canReorder ? () => setDragOverKey("") : undefined}
+                  onDrop={canReorder ? (event) => dropHolding(event, holding) : undefined}
+                >
+                  <td className="drag-cell">
+                    {canReorder ? (
+                      <span
+                        className="drag-handle"
+                        draggable
+                        title="Drag to reorder"
+                        aria-label={`Drag ${tickerLabel(holding)} to reorder`}
+                        role="button"
+                        tabIndex={0}
+                        onDragStart={(event) => startDrag(event, holding)}
+                        onDragEnd={() => {
+                          setDraggedKey("");
+                          setDragOverKey("");
+                        }}
+                      >
+                        <DragHandleIcon />
+                      </span>
+                    ) : null}
+                  </td>
                   <td className="action-cell">
                     {onOpenTrade && canTradeHolding(holding) ? (
                       <button
@@ -3878,6 +4048,7 @@ function HoldingsTable({ holdings, accountName, sort, weightKey, showAccount, sh
           <tfoot>
             <tr>
               <td />
+              <td />
               <td>Total</td>
               <td />
               <td />
@@ -3932,12 +4103,13 @@ function sortedHoldings(holdings, queryText, sort) {
     const aValue = a[sort.key];
     const bValue = b[sort.key];
     const direction = sort.direction === "asc" ? 1 : -1;
+    const fallback = String(a.symbol || a.description || "").localeCompare(String(b.symbol || b.description || ""));
 
     if (typeof aValue === "number" || typeof bValue === "number") {
-      return ((Number(aValue) || 0) - (Number(bValue) || 0)) * direction;
+      return (((Number(aValue) || 0) - (Number(bValue) || 0)) * direction) || fallback;
     }
 
-    return String(aValue || "").localeCompare(String(bValue || "")) * direction;
+    return (String(aValue || "").localeCompare(String(bValue || "")) * direction) || fallback;
   });
 }
 

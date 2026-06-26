@@ -553,6 +553,12 @@ main {
   color: var(--blue);
 }
 
+.statement-order-button.active {
+  border-color: var(--blue);
+  background: #edf4ff;
+  color: var(--blue);
+}
+
 .quiet-button:disabled {
   cursor: progress;
   opacity: 0.6;
@@ -1105,7 +1111,7 @@ tr:hover td {
 }
 
 .account-holdings-wrap table {
-  min-width: 1560px;
+  min-width: 1592px;
 }
 
 .account-holdings-wrap table.show-derisk {
@@ -1137,8 +1143,51 @@ tr:hover td {
   text-align: center;
 }
 
+.account-holdings-table .drag-column,
+.account-holdings-table .drag-cell {
+  width: 32px;
+  min-width: 32px;
+  text-align: center;
+}
+
 .account-holdings-table .action-cell {
   padding: 2px 4px;
+}
+
+.account-holdings-table .drag-cell {
+  padding: 2px 3px;
+}
+
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #59656d;
+  cursor: grab;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.drag-handle:hover {
+  border-color: var(--line);
+  background: #f1f5f7;
+  color: var(--text);
+}
+
+.drag-handle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.drag-handle svg circle {
+  fill: currentColor;
+  stroke: none;
 }
 
 .account-holdings-table .derisk-column {
@@ -1178,6 +1227,14 @@ tr:hover td {
 
 .account-holdings-table tr:hover td {
   background: #f7faf9;
+}
+
+.account-holdings-table tr.drag-over td {
+  background: #e8f1ff;
+}
+
+.account-holdings-table tr.dragging td {
+  opacity: 0.55;
 }
 
 .account-company {

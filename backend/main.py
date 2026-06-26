@@ -44,6 +44,7 @@ from server import (
     refresh_current_prices,
     save_balance_snapshot,
     save_account,
+    save_account_holding_order,
     save_fundamentals_watchlist_stock,
     save_private_fund_mark,
     save_transaction,
@@ -167,6 +168,10 @@ class AccountTradePayload(BaseModel):
 
 class CashBalancesPayload(BaseModel):
     cash_balances: list[CashBalancePayload]
+
+
+class HoldingOrderPayload(BaseModel):
+    holding_order: list[str]
 
 
 class FundamentalsWatchlistPayload(BaseModel):
@@ -486,6 +491,14 @@ def edit_account_cash(account_id: int, payload: CashBalancesPayload, username: s
             account_id,
             [item.dict() for item in payload.cash_balances],
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/api/accounts/{account_id}/holdings/order")
+def edit_account_holding_order(account_id: int, payload: HoldingOrderPayload, username: str = Depends(require_auth)):
+    try:
+        return save_account_holding_order(account_id, payload.holding_order)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
