@@ -201,10 +201,17 @@ function transactionTypeLabel(value) {
   return transactionTypes.find(([type]) => type === value)?.[1] || String(value || "");
 }
 
+function isCashHolding(holding) {
+  const symbol = String(holding?.symbol || "").trim().toUpperCase();
+  const market = String(holding?.market || "").trim();
+  const assetType = String(holding?.asset_type || "").trim().toLowerCase();
+  return symbol === "CASH" && (!market || assetType === "cash");
+}
+
 function tickerLabel(holding) {
   const symbol = String(holding?.symbol || "").trim().toUpperCase();
   const market = String(holding?.market || "").trim().toUpperCase();
-  if (!symbol || symbol === "CASH") return symbol;
+  if (!symbol || isCashHolding(holding)) return symbol;
   if (["CDN", "CAN", "CA", "TSX", "TSXV"].includes(market)) return `TSE:${symbol}`;
   if (market === "US") return symbol;
   return market ? `${market}:${symbol}` : symbol;
@@ -273,7 +280,7 @@ function isPrivateFundAccount(account) {
 function canOpenStock(holding) {
   const symbol = String(holding?.symbol || "").trim().toUpperCase();
   const market = String(holding?.market || "").trim().toUpperCase();
-  return Boolean(symbol && symbol !== "CASH" && !["PRIVATE", "MANUAL", "FUND", "PRIVATE FUND"].includes(market));
+  return Boolean(symbol && !isCashHolding(holding) && !["PRIVATE", "MANUAL", "FUND", "PRIVATE FUND"].includes(market));
 }
 
 function canTradeHolding(holding) {

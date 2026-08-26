@@ -933,8 +933,10 @@ def default_transaction_net_amount(transaction_type, quantity, price, gross_amou
     tax_value = money_value(tax)
     trade_value = quantity_value * price_value if quantity_value and price_value else gross_value
 
-    if transaction_type in {"BUY", "DRIP"}:
+    if transaction_type == "BUY":
         return -abs(trade_value) - abs(fee_value) - abs(tax_value)
+    if transaction_type == "DRIP":
+        return 0.0
     if transaction_type == "SELL":
         return abs(trade_value) - abs(fee_value) - abs(tax_value)
     if transaction_type in {"DIVIDEND", "INTEREST", "TRANSFER_IN", "DEPOSIT"}:
@@ -1775,10 +1777,11 @@ def save_transaction(
             notes,
         )
         position_effect = apply_transaction_position_effect(conn, transaction_id)
-        if position_effect:
-            set_transaction_position_effect(conn, transaction_id, position_effect)
+        transaction_effect = apply_transaction_cash_effect(conn, transaction_id, position_effect)
+        if transaction_effect:
+            set_transaction_position_effect(conn, transaction_id, transaction_effect)
 
-    return {"transaction": get_transaction(transaction_id), "position_effect": position_effect, **list_transactions()}
+    return {"transaction": get_transaction(transaction_id), "position_effect": transaction_effect, **list_transactions()}
 
 
 def set_transaction_position_effect(conn, transaction_id, position_effect, now=None):
@@ -2020,6 +2023,57 @@ def apply_transaction_position_effect(conn, transaction_id):
     }
 
 
+def apply_transaction_cash_effect(conn, transaction_id, position_effect=None):
+    transaction = conn.execute(
+        """
+        SELECT *
+        FROM portfolio_transactions
+        WHERE id = ? AND active = 1
+        """,
+        (transaction_id,),
+    ).fetchone()
+    if not transaction:
+        return position_effect
+
+    transaction_type = str(transaction.get("transaction_type") or "").strip().upper()
+    cash_delta = 0.0 if transaction_type == "DRIP" else money_value(transaction.get("net_amount"))
+    if abs(cash_delta) <= 0.000001:
+        return position_effect
+
+    account_id = transaction["account_id"]
+    cash_currency = normalize_currency(transaction.get("currency"))
+    batch = latest_batch_for_account(conn, account_id)
+    cash_by_currency = {
+        item["currency"]: item["amount"]
+        for item in normalize_cash_balances(cash_balances_for_batch(conn, batch["id"]) if batch else [])
+    }
+    current_cash = cash_by_currency.get(cash_currency, 0.0)
+    updated_cash = current_cash + cash_delta
+    if transaction_type == "BUY" and updated_cash < -0.005:
+        raise ValueError(
+            f"Purchase net amount exceeds {cash_currency} cash balance "
+            f"{current_cash:,.2f}."
+        )
+
+    cash_by_currency[cash_currency] = updated_cash
+    set_latest_cash_balances_for_account(
+        conn,
+        account_id,
+        [{"currency": currency, "amount": amount} for currency, amount in cash_by_currency.items()],
+        utc_now(),
+    )
+
+    effect = dict(position_effect or {})
+    effect.setdefault("version", 1)
+    effect.setdefault("kind", "cash")
+    effect.setdefault("quantity_delta", 0.0)
+    effect.setdefault("book_value_delta", 0.0)
+    effect.setdefault("currency", cash_currency)
+    effect["cash_currency"] = cash_currency
+    effect["cash_delta"] = cash_delta
+    return effect
+
+
 def parse_position_effect_json(value):
     if not value:
         return None
@@ -2038,10 +2092,11 @@ def revert_transaction_position_effect(conn, transaction):
         return None
 
     account_id = transaction["account_id"]
+    revert_transaction_cash_effect(conn, account_id, effect, utc_now())
     quantity_delta = money_value(effect.get("quantity_delta"))
     book_value_delta = money_value(effect.get("book_value_delta"))
     if abs(quantity_delta) <= 0.000001:
-        return None
+        return effect
 
     now = utc_now()
     if effect.get("kind") == "manual_holding":
@@ -2086,7 +2141,6 @@ def revert_transaction_position_effect(conn, transaction):
                 ),
             )
         conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
-        revert_transaction_cash_effect(conn, account_id, effect, now)
         return effect
 
     if effect.get("kind") == "holding":
@@ -2138,7 +2192,6 @@ def revert_transaction_position_effect(conn, transaction):
         )
         sync_batch_totals_from_holdings_and_cash(conn, batch_id)
         conn.execute("UPDATE accounts SET updated_at = ? WHERE id = ?", (now, account_id))
-        revert_transaction_cash_effect(conn, account_id, effect, now)
         return effect
 
     return None
@@ -3472,7 +3525,7 @@ def import_history_content(content: bytes, filename: str = "history.csv"):
 def yahoo_symbol_for(symbol, market):
     cleaned_symbol = str(symbol or "").strip().upper()
     cleaned_market = str(market or "").strip().upper()
-    if not cleaned_symbol or cleaned_symbol == "CASH":
+    if not cleaned_symbol or (cleaned_symbol == "CASH" and not cleaned_market):
         return ""
     if cleaned_market in {"PRIVATE", "MANUAL", "FUND", "PRIVATE FUND"}:
         return ""
@@ -3500,7 +3553,10 @@ def active_price_targets():
                 FROM holdings
                 WHERE holdings.batch_id IN ({latest_batch_filter_sql()})
                     AND COALESCE(holdings.symbol, '') != ''
-                    AND UPPER(COALESCE(holdings.symbol, '')) != 'CASH'
+                    AND NOT (
+                        UPPER(COALESCE(holdings.symbol, '')) = 'CASH'
+                        AND TRIM(COALESCE(holdings.market, '')) = ''
+                    )
                     AND ABS(COALESCE(holdings.quantity, 0)) > 0.000001
                 UNION ALL
                 SELECT
@@ -3510,7 +3566,10 @@ def active_price_targets():
                 FROM manual_holdings
                 WHERE manual_holdings.active = 1
                     AND COALESCE(manual_holdings.symbol, '') != ''
-                    AND UPPER(COALESCE(manual_holdings.symbol, '')) != 'CASH'
+                    AND NOT (
+                        UPPER(COALESCE(manual_holdings.symbol, '')) = 'CASH'
+                        AND TRIM(COALESCE(manual_holdings.market, '')) = ''
+                    )
             )
             ORDER BY market, symbol
             """
@@ -4976,7 +5035,7 @@ def unique_stock_targets_from_holdings(holdings):
             continue
         symbol = str(holding.get("symbol") or "").strip().upper()
         market = str(holding.get("market") or "").strip().upper()
-        if not symbol or symbol == "CASH":
+        if not symbol:
             continue
         yahoo_symbol = yahoo_symbol_for(symbol, market)
         if yahoo_symbol:
