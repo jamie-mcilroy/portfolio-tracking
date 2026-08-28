@@ -124,6 +124,22 @@ function formatPercent(value) {
   return `${Number(value).toFixed(2)}%`;
 }
 
+function formatSignedPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  const amount = Number(value);
+  return `${amount >= 0 ? "+" : ""}${formatPercent(amount)}`;
+}
+
+function formatBasisPoints(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  const amount = Number(value);
+  return `${amount >= 0 ? "+" : ""}${amount.toFixed(0)} bps`;
+}
+
 function formatRatio(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "n/a";
@@ -1797,7 +1813,7 @@ function PriceUpdateFooter({ status }) {
 
 function buildAccountMonthlyPivot(snapshots, accountId) {
   const rowsByYear = new Map();
-  let previousValue = null;
+  const previousValuesByYear = new Map();
 
   [...snapshots]
     .reverse()
@@ -1813,35 +1829,45 @@ function buildAccountMonthlyPivot(snapshots, accountId) {
       }
 
       const currentValue = Number(account.value || 0);
-      let changePct = Number(account.day_change_pct);
-      if (!Number.isFinite(changePct) && previousValue) {
-        changePct = ((currentValue - previousValue) / previousValue) * 100;
-      }
-      previousValue = currentValue;
-
-      if (!Number.isFinite(changePct)) {
+      if (!Number.isFinite(currentValue)) {
         return;
       }
 
       const date = new Date(parsed);
       const year = date.getFullYear();
       const month = date.getMonth();
+      const previousValue = previousValuesByYear.get(year);
+      previousValuesByYear.set(year, currentValue);
+      if (!previousValue) {
+        return;
+      }
+      const changePct = ((currentValue - previousValue) / previousValue) * 100;
       const row = rowsByYear.get(year) || {
         year,
-        months: Array(12).fill(0),
+        months: Array(12).fill(1),
         counts: Array(12).fill(0),
       };
-      row.months[month] += changePct;
+      row.months[month] *= 1 + changePct / 100;
       row.counts[month] += 1;
       rowsByYear.set(year, row);
     });
 
   const rows = Array.from(rowsByYear.values())
-    .map((row) => ({
-      ...row,
-      annual: row.months.reduce((sum, value, index) => sum + (row.counts[index] ? value : 0), 0),
-      annualCount: row.counts.reduce((sum, value) => sum + value, 0),
-    }))
+    .map((row) => {
+      const months = row.months.map((growthFactor, index) =>
+        row.counts[index] ? (growthFactor - 1) * 100 : 0,
+      );
+      const annualGrowthFactor = row.months.reduce(
+        (product, growthFactor, index) => product * (row.counts[index] ? growthFactor : 1),
+        1,
+      );
+      return {
+        ...row,
+        months,
+        annual: (annualGrowthFactor - 1) * 100,
+        annualCount: row.counts.reduce((sum, value) => sum + value, 0),
+      };
+    })
     .sort((left, right) => right.year - left.year);
 
   const average = {
@@ -2010,6 +2036,8 @@ function AccountPerformanceChart({ series, loading }) {
   const first = visibleSeries[0];
   const latest = visibleSeries[visibleSeries.length - 1];
   const change = latest.value - first.value;
+  const percentChange = first.value ? (change / first.value) * 100 : null;
+  const basisPointChange = percentChange === null ? null : percentChange * 100;
   const width = 900;
   const height = 220;
   const pad = { top: 18, right: 22, bottom: 24, left: 112 };
@@ -2069,7 +2097,7 @@ function AccountPerformanceChart({ series, loading }) {
         </span>
         <strong className={toneClass(change)}>
           {formatMoney(latest.value)} ({change >= 0 ? "+" : ""}
-          {formatMoney(change)})
+          {formatMoney(change)} · {formatSignedPercent(percentChange)} · {formatBasisPoints(basisPointChange)})
         </strong>
       </div>
       <PerformanceRangeControls selectedRange={selectedRange} onChange={setSelectedRange} />
