@@ -76,14 +76,14 @@ After the frontend is built, FastAPI can serve the compiled app from `frontend/d
 
 ```bash
 cd /Users/jmcilroy/scripts/investments
-.venv/bin/python -c "from pathlib import Path; from server import import_path; print(import_path(Path('/Users/jmcilroy/Downloads/AccountHoldings-BookValue.csv')))"
+.venv/bin/python -c "from pathlib import Path; from server import import_path; print(import_path(Path('/Users/jmcilroy/Downloads/AccountHoldings-BookValue.csv'), account_override='Jamie RRSP'))"
 ```
 
 Optional cash can be attached to the same monthly snapshot:
 
 ```bash
 cd /Users/jmcilroy/scripts/investments
-.venv/bin/python -c "from pathlib import Path; from server import import_path; print(import_path(Path('/Users/jmcilroy/Downloads/AccountHoldings-BookValue (2).csv'), cash_balance=185959.41, cash_currency='CAD'))"
+.venv/bin/python -c "from pathlib import Path; from server import import_path; print(import_path(Path('/Users/jmcilroy/Downloads/AccountHoldings-BookValue (2).csv'), account_override='Jamie RRSP', cash_balance=185959.41, cash_currency='CAD'))"
 ```
 
 ## Import Balance History
@@ -395,7 +395,10 @@ tar -czf "$HOME/portfolio-tracker-data-$(date +%Y%m%d).tgz" -C /opt portfolio-tr
 - The first importer supports the BookValue holdings CSV layout with metadata rows, currency summaries, and a holdings table headed by `Asset type`.
 - Cash balances are stored separately from securities, then included in account totals and allocation.
 - Use the `Accounts` tab to set up account names, owners, account types, base currencies, and notes before importing holdings.
+- Holdings imports require selecting an existing account. CLI imports must supply `--account-name`, or `account_override` when calling `import_path`; imports never create accounts.
+- Admins can delete an account from the `Accounts` tab after confirmation. Deletion removes its holdings, cash, transactions, private-fund marks, and account history, and recalculates affected saved portfolio totals. Dates with no remaining accounts are removed. Original uploaded CSV files remain archived on disk.
 - Positions are snapshot-based for now. Monthly uploads create import batches and the dashboard uses the latest batch for each account.
+- Imported positions replace matching manual positions using ticker and market within the selected account, regardless of company-name differences. Original transactions remain in history; subsequent trades update the imported position.
 - Live prices are stored separately from imported holdings. The default Docker refresh interval is 60 seconds and can be changed with `PORTFOLIO_PRICE_REFRESH_SECONDS`.
 - The background price fetcher only runs during the configured market window, defaulting to `07:45` through `16:00` in `America/Edmonton`.
 - Canadian tickers are requested from Yahoo Finance with `.TO` suffixes, while US tickers are converted to CAD with `CAD=X`.

@@ -1128,6 +1128,60 @@ def update_account(account_id, name, owner="", account_type="Investment", base_c
     return {"updated": True, "account": account}
 
 
+def delete_account(account_id):
+    init_db()
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        account = conn.execute("SELECT id, name FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not account:
+            raise ValueError("Account not found.")
+
+        dates = conn.execute(
+            "SELECT market_date FROM account_balance_snapshots WHERE account_id = ?",
+            (account_id,),
+        ).fetchall()
+        conn.execute("DELETE FROM account_balance_snapshots WHERE account_id = ?", (account_id,))
+        conn.execute("DELETE FROM import_batches WHERE account_id = ?", (account_id,))
+        conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+
+        # Remove this account from saved portfolio totals as well as current holdings.
+        for row in dates:
+            market_date = row["market_date"]
+            totals = conn.execute(
+                """
+                SELECT COUNT(*) AS count, SUM(value) AS total_value,
+                       SUM(imported_value) AS imported_value, SUM(book_value) AS book_value,
+                       SUM(gain_loss) AS gain_loss, SUM(day_change) AS day_change
+                FROM account_balance_snapshots WHERE market_date = ?
+                """,
+                (market_date,),
+            ).fetchone()
+            if not totals["count"]:
+                conn.execute("DELETE FROM balance_snapshots WHERE market_date = ?", (market_date,))
+                continue
+            previous_value = totals["total_value"] - (totals["day_change"] or 0)
+            conn.execute(
+                """
+                UPDATE balance_snapshots
+                SET total_value = ?, imported_value = ?, book_value = ?, gain_loss = ?,
+                    gain_loss_pct = ?, day_change = ?, day_change_pct = ?, updated_at = ?
+                WHERE market_date = ?
+                """,
+                (
+                    totals["total_value"], totals["imported_value"], totals["book_value"],
+                    totals["gain_loss"],
+                    totals["gain_loss"] / totals["book_value"] * 100 if totals["book_value"] else None,
+                    totals["day_change"],
+                    totals["day_change"] / previous_value * 100
+                    if totals["day_change"] is not None and previous_value else None,
+                    utc_now(), market_date,
+                ),
+            )
+
+    # Keep preserved source CSVs as an archive; no longer linked to live account data.
+    return {"deleted": True, "account_id": account_id, "account_name": account["name"]}
+
+
 def create_manual_cash_batch(conn, account_id, cash_balances, now):
     account = conn.execute(
         """
@@ -1538,9 +1592,25 @@ def manual_holding_values(row, usd_cad_rate=1.0):
     }
 
 
+def current_manual_holding_filter_sql():
+    # A new statement replaces a manual position for the same security, even
+    # when the imported position has since been sold down to zero shares.
+    return """
+        NOT EXISTS (
+            SELECT 1 FROM holdings
+            WHERE holdings.batch_id = (
+                SELECT MAX(id) FROM import_batches
+                WHERE account_id = manual_holdings.account_id
+            )
+            AND UPPER(TRIM(COALESCE(holdings.symbol, ''))) = UPPER(TRIM(manual_holdings.symbol))
+            AND UPPER(TRIM(COALESCE(holdings.market, ''))) = UPPER(TRIM(manual_holdings.market))
+        )
+    """
+
+
 def manual_holding_summary_rows(conn, usd_cad_rate=1.0):
     rows = conn.execute(
-        """
+        f"""
         SELECT
             manual_holdings.*,
             accounts.id AS account_id,
@@ -1549,6 +1619,7 @@ def manual_holding_summary_rows(conn, usd_cad_rate=1.0):
         FROM manual_holdings
         JOIN accounts ON accounts.id = manual_holdings.account_id
         WHERE manual_holdings.active = 1
+            AND {current_manual_holding_filter_sql()}
         ORDER BY accounts.name, manual_holdings.symbol
         """
     ).fetchall()
@@ -1603,10 +1674,11 @@ def list_manual_holdings(account_id):
         if not account:
             raise ValueError("Account not found.")
         rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM manual_holdings
             WHERE account_id = ? AND active = 1
+                AND {current_manual_holding_filter_sql()}
             ORDER BY symbol, market
             """,
             (account_id,),
@@ -1845,13 +1917,14 @@ def apply_transaction_position_effect(conn, transaction_id):
     now = utc_now()
 
     manual_holding = conn.execute(
-        """
+        f"""
         SELECT *
         FROM manual_holdings
         WHERE account_id = ?
             AND UPPER(COALESCE(symbol, '')) = ?
             AND UPPER(COALESCE(market, '')) = ?
             AND active = 1
+            AND {current_manual_holding_filter_sql()}
         LIMIT 1
         """,
         (account_id, values["symbol"], values["market"]),
@@ -2574,10 +2647,11 @@ def apply_account_trade(
 
         if clean_manual_holding_id is not None:
             manual_holding = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM manual_holdings
                 WHERE id = ? AND account_id = ? AND active = 1
+                    AND {current_manual_holding_filter_sql()}
                 """,
                 (clean_manual_holding_id, account_id),
             ).fetchone()
@@ -2938,6 +3012,12 @@ def import_content_with_cash(
     cash_currency: str = "CAD",
 ):
     init_db()
+    account_name = (account_override or "").strip()
+    if not account_name:
+        raise ValueError("Select an existing account before importing holdings.")
+    with get_connection() as conn:
+        if not conn.execute("SELECT id FROM accounts WHERE name = ?", (account_name,)).fetchone():
+            raise ValueError("Selected account not found. Create it in Accounts before importing holdings.")
     sha256 = hashlib.sha256(content).hexdigest()
     source_filename = Path(filename or "holdings.csv").name
     cash_provided = cash_balance is not None and str(cash_balance).strip() != ""
@@ -2964,7 +3044,6 @@ def import_content_with_cash(
         cash_total = sum(item["amount"] for item in import_cash_balances)
         cash_currencies = {item["currency"] for item in import_cash_balances if item["amount"]}
         cash_currency_label = next(iter(cash_currencies)) if len(cash_currencies) == 1 else ("MIXED" if cash_currencies else "")
-        account_name = account_override.strip() or metadata["account_name"] or "Imported Account"
         account_slug = slugify(account_name)
         account_dir = IMPORT_DIR / account_slug
         account_dir.mkdir(parents=True, exist_ok=True)
@@ -2974,9 +3053,14 @@ def import_content_with_cash(
         stored_path = account_dir / stored_filename
 
         with get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            account = conn.execute("SELECT id FROM accounts WHERE name = ?", (account_name,)).fetchone()
+            if not account:
+                raise ValueError("Selected account not found. Create it in Accounts before importing holdings.")
+            account_id = account["id"]
             existing = conn.execute(
                 """
-                SELECT import_batches.id, accounts.name
+                SELECT import_batches.id, import_batches.account_id, accounts.name
                 FROM import_batches
                 JOIN accounts ON accounts.id = import_batches.account_id
                 WHERE import_batches.file_sha256 = ?
@@ -2985,6 +3069,8 @@ def import_content_with_cash(
             ).fetchone()
 
             if existing:
+                if existing["account_id"] != account_id:
+                    raise ValueError(f"This exact file has already been imported into {existing['name']}.")
                 return {
                     "imported": False,
                     "batch_id": existing["id"],
@@ -2992,9 +3078,16 @@ def import_content_with_cash(
                     "message": "This exact file has already been imported.",
                 }
 
+            # Retire manual positions covered by the previous statement, too,
+            # so a security missing from the new statement cannot reappear.
+            conn.execute(
+                f"""UPDATE manual_holdings SET active = 0, updated_at = ?
+                WHERE account_id = ? AND active = 1
+                    AND NOT ({current_manual_holding_filter_sql()})""",
+                (utc_now(), account_id),
+            )
             shutil.move(str(temp_path), stored_path)
             relative_stored_path = str(stored_path.relative_to(BASE_DIR))
-            account_id = upsert_account(conn, account_name, metadata.get("owner", ""))
             securities_closing, securities_book, total_gain, _ = totals_from_summaries(
                 parsed["currency_summaries"]
             )
@@ -3117,6 +3210,12 @@ def import_content_with_cash(
                 ],
             )
 
+            conn.execute(
+                f"""UPDATE manual_holdings SET active = 0, updated_at = ?
+                WHERE account_id = ? AND active = 1
+                    AND NOT ({current_manual_holding_filter_sql()})""",
+                (utc_now(), account_id),
+            )
             return {
                 "imported": True,
                 "batch_id": batch_id,
@@ -3565,6 +3664,7 @@ def active_price_targets():
                     manual_holdings.currency
                 FROM manual_holdings
                 WHERE manual_holdings.active = 1
+                    AND {current_manual_holding_filter_sql()}
                     AND COALESCE(manual_holdings.symbol, '') != ''
                     AND NOT (
                         UPPER(COALESCE(manual_holdings.symbol, '')) = 'CASH'

@@ -420,6 +420,7 @@ function App() {
   const [fileLabel, setFileLabel] = useState("Choose CSV");
   const [historyFileLabel, setHistoryFileLabel] = useState("Choose CSV");
   const [editingAccount, setEditingAccount] = useState(null);
+  const [deletingAccountId, setDeletingAccountId] = useState(null);
   const [tradeDraft, setTradeDraft] = useState(null);
   const [cashDraft, setCashDraft] = useState(null);
 
@@ -747,6 +748,10 @@ function App() {
     event.preventDefault();
     const form = event.currentTarget;
     const input = form.querySelector("input[type='file']");
+    if (!form.elements.account_name.value) {
+      showMessage("Select an existing account before importing holdings.", true);
+      return;
+    }
     if (!input.files.length) {
       showMessage("Choose a CSV file first.", true);
       return;
@@ -870,6 +875,32 @@ function App() {
       showMessage(error.message, true);
     } finally {
       button.disabled = false;
+    }
+  }
+
+  async function handleDeleteAccount(account) {
+    if (deletingAccountId !== null) return;
+    if (!window.confirm(`Delete ${account.name}? This permanently removes its holdings, cash balances, transactions, private-fund marks, and account history. Saved portfolio totals will be recalculated. Original uploaded CSV files remain archived. This cannot be undone.`)) {
+      return;
+    }
+    setDeletingAccountId(account.id);
+    try {
+      const response = await apiFetch(`/api/accounts/${account.id}`, { method: "DELETE" });
+      await parseApiResponse(response);
+      if (editingAccount?.id === account.id) setEditingAccount(null);
+      if (activeAccountId === account.id) setActiveAccountId(null);
+      setHistoryData(null);
+      setTransactionsData(null);
+      setActiveView("accounts");
+      await loadSummary();
+      showMessage(`Deleted ${account.name}.`);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        setAuth({ status: "anonymous", username: null, isAdmin: false });
+      }
+      showMessage(error.message, true);
+    } finally {
+      setDeletingAccountId(null);
     }
   }
 
@@ -1233,6 +1264,8 @@ function App() {
               onSubmit={handleSaveAccount}
               onEdit={setEditingAccount}
               onCancelEdit={() => setEditingAccount(null)}
+              onDelete={auth.isAdmin ? handleDeleteAccount : null}
+              deletingAccountId={deletingAccountId}
             />
           )}
 
@@ -1393,14 +1426,15 @@ function HoldingsImportPage({ accounts, fileLabel, onFileChange, onSubmit }) {
             </label>
           </div>
           <label>
-            <span>Account override</span>
-            <input name="account_name" type="text" list="accountOptions" placeholder="Optional account name" />
+            <span>Account</span>
+            <select name="account_name" defaultValue="" required>
+              <option value="" disabled>Select an existing account</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.name}>{account.name}</option>
+              ))}
+            </select>
           </label>
-          <datalist id="accountOptions">
-            {accounts.map((account) => (
-              <option key={account.id} value={account.name} />
-            ))}
-          </datalist>
+          {!accounts.length ? <p>Create an account in Accounts before importing holdings.</p> : null}
           <label>
             <span>Cash balance</span>
             <input name="cash_balance" type="number" step="0.01" min="0" placeholder="Optional" />
@@ -2809,7 +2843,7 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
   );
 }
 
-function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCancelEdit }) {
+function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCancelEdit, onDelete, deletingAccountId }) {
   const orderedAccounts = sortAccountsForDisplay(accounts);
   const cashCadDefaultValue = cashInputDefault(editingAccount, "CAD");
   const cashUsdDefaultValue = cashInputDefault(editingAccount, "USD");
@@ -2925,6 +2959,11 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
                     <button className="quiet-button" type="button" onClick={() => onEdit(account)}>
                       Edit
                     </button>
+                    {onDelete ? (
+                      <button className="quiet-button" type="button" disabled={deletingAccountId !== null} onClick={() => onDelete(account)}>
+                        {deletingAccountId === account.id ? "Deleting…" : "Delete"}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               ))

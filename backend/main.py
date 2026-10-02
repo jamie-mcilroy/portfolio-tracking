@@ -23,6 +23,7 @@ from server import (
     authenticate_user,
     balance_snapshot_exists,
     create_user,
+    delete_account,
     delete_transaction,
     delete_fundamentals_watchlist_stock,
     ensure_auth_user,
@@ -482,6 +483,14 @@ def account_trade(account_id: int, payload: AccountTradePayload, username: str =
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/accounts/{account_id}")
+def remove_account(account_id: int, username: str = Depends(require_admin)):
+    try:
+        return delete_account(account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.patch("/api/accounts/{account_id}/cash")
