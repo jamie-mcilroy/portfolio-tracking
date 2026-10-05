@@ -403,6 +403,9 @@ main {
   border: 0;
   border-radius: 0;
   box-shadow: none;
+  overflow: visible;
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .tab {
@@ -487,21 +490,20 @@ main {
 }
 
 .account-switcher {
-  display: inline-grid;
-  gap: 2px;
-  min-width: 280px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .account-switcher span {
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .account-switcher select {
-  width: 100%;
-  min-height: 34px;
-  max-width: 380px;
+  width: 240px;
+  height: 36px;
   padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -511,30 +513,140 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-.account-cash-group {
-  display: inline-flex;
+.security-switcher {
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+  min-width: 0;
 }
 
-.account-cash-pill {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
-  min-height: 34px;
+.security-switcher > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.security-switcher select {
+  width: 340px;
+  max-width: 100%;
+  min-width: 0;
+  height: 34px;
   padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #ffffff;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
 }
 
-.account-cash-pill strong {
+.security-switcher select:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.account-overview-header {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto auto;
+  justify-content: stretch;
+  align-items: center;
+  gap: 24px;
+  padding: 16px 20px;
+}
+
+.account-overview-header .account-title p {
+  font-size: 12px;
+}
+
+.account-overview-header .account-switcher {
+  width: auto;
+}
+
+.account-value {
+  display: grid;
+  gap: 2px;
+}
+
+.account-value > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.account-value > strong {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-overview-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.account-cash-button,
+.account-trade-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 20px;
+}
+
+.account-cash-button {
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.account-cash-button strong {
   color: var(--text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+.cash-edit-hint {
+  margin-left: 4px;
+  color: var(--blue);
+  font-size: 11px;
+}
+
+.account-cash-button:hover {
+  border-color: var(--blue);
+  background: #edf4ff;
+}
+
+.account-trade-button {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.account-trade-button:hover {
+  background: #1d5087;
+  border-color: #1d5087;
+}
+
+.account-trade-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.account-overview-header button:focus-visible,
+.account-overview-header select:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
 }
 
 .quiet-button {
@@ -719,6 +831,16 @@ main {
 .modal-form {
   display: grid;
   gap: 12px;
+}
+
+.income-impact-preview {
+  padding: 12px;
+  border: 1px solid var(--border, #d4dce5);
+  border-radius: 6px;
+}
+
+.income-impact-preview p {
+  margin: 8px 0 0;
 }
 
 .modal-form label {
@@ -1925,6 +2047,18 @@ tr:hover td {
   text-align: center;
 }
 
+@media (max-width: 1100px) {
+  .account-overview-header {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .account-overview-header .account-switcher select {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 @media (max-width: 960px) {
   .topbar,
   .account-header,
@@ -1970,6 +2104,12 @@ tr:hover td {
     align-items: stretch;
   }
 
+  .account-overview-header {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+    gap: 16px;
+  }
+
   .header-actions {
     justify-content: flex-start;
   }
@@ -2012,12 +2152,27 @@ tr:hover td {
     align-items: stretch;
   }
 
-  .account-cash-group {
-    justify-content: flex-start;
+  .security-switcher select {
+    flex: 1;
+    width: 100%;
   }
 
-  .account-cash-pill {
-    white-space: normal;
+  .account-switcher select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .account-overview-header {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  .account-overview-actions {
+    gap: 8px;
+  }
+
+  .account-cash-button {
+    flex-wrap: wrap;
   }
 
   .private-fund-form {

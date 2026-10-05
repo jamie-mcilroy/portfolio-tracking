@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import wbfcLogoUrl from "./assets/wbfc-logo.png";
 import "./styles.css";
@@ -76,6 +76,13 @@ const number = new Intl.NumberFormat("en-CA", {
 });
 
 class AuthError extends Error {}
+
+function incomeImpactMessage(transaction) {
+  const impact = transaction?.income_impact;
+  if (!impact) return "";
+  const sign = impact.annual_income_change >= 0 ? "+" : "";
+  return ` Estimated income: ${sign}${formatMoney(impact.annual_income_change)}/year (${sign}${formatMoney(impact.monthly_income_change)}/month), in CAD.`;
+}
 
 function formatMoney(value) {
   return money.format(Number(value || 0));
@@ -299,6 +306,12 @@ function canOpenStock(holding) {
   return Boolean(symbol && !isCashHolding(holding) && !["PRIVATE", "MANUAL", "FUND", "PRIVATE FUND"].includes(market));
 }
 
+function securitySelectionKey(holding) {
+  const market = String(holding?.market || "").trim().toUpperCase();
+  const normalizedMarket = ["CDN", "CAN", "CA", "TSX", "TSXV"].includes(market) ? "CDN" : market;
+  return `${normalizedMarket}:${String(holding?.symbol || "").trim().toUpperCase()}`;
+}
+
 function canTradeHolding(holding) {
   const assetType = String(holding?.asset_type || "").trim().toLowerCase();
   return canOpenStock(holding) && assetType !== "private fund";
@@ -412,6 +425,7 @@ function App() {
   const [stockData, setStockData] = useState(null);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState("");
+  const stockRequestId = useRef(0);
   const [fundamentalsQuery, setFundamentalsQuery] = useState("");
   const [fundamentalsSort, setFundamentalsSort] = useState({ key: "symbol", direction: "asc" });
   const [accountQuery, setAccountQuery] = useState("");
@@ -679,6 +693,7 @@ function App() {
       return;
     }
 
+    const requestId = ++stockRequestId.current;
     const params = new URLSearchParams();
     if (stock.market) params.set("market", stock.market);
     if (refresh) params.set("refresh", "true");
@@ -687,18 +702,20 @@ function App() {
     try {
       const response = await apiFetch(`/api/stocks/${encodeURIComponent(stock.symbol)}?${params.toString()}`);
       const payload = await parseApiResponse(response);
+      if (requestId !== stockRequestId.current) return;
       setStockData(payload);
       if (payload.error) {
         setStockError(payload.error);
       }
     } catch (error) {
+      if (requestId !== stockRequestId.current) return;
       if (error instanceof AuthError) {
         setAuth({ status: "anonymous", username: null, isAdmin: false });
       } else {
         setStockError(error.message);
       }
     } finally {
-      setStockLoading(false);
+      if (requestId === stockRequestId.current) setStockLoading(false);
     }
   }
 
@@ -709,6 +726,7 @@ function App() {
     const stock = {
       symbol: holding.symbol,
       market: holding.market || "",
+      description: holding.description || "",
     };
     setActiveStock(stock);
     setStockData(null);
@@ -994,7 +1012,7 @@ function App() {
       form.elements.transaction_type.value = "DIVIDEND";
       form.elements.currency.value = "CAD";
       await loadSummary();
-      showMessage("Saved transaction.");
+      showMessage(`Saved transaction.${incomeImpactMessage(result.transaction)}`);
     } catch (error) {
       if (error instanceof AuthError) {
         setAuth({ status: "anonymous", username: null, isAdmin: false });
@@ -1048,7 +1066,7 @@ function App() {
       if (transactionsData) {
         await loadTransactions();
       }
-      showMessage(result.message || "Saved trade.");
+      showMessage(`${result.message || "Saved trade."}${incomeImpactMessage(result.transaction)}`);
       setTradeDraft(null);
       return true;
     } catch (error) {
@@ -1057,6 +1075,43 @@ function App() {
       }
       showMessage(error.message, true);
       return false;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleSaveNewTrade(account, event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    const fields = new FormData(form);
+    const quantity = Number(fields.get("shares"));
+    const price = Number(fields.get("price"));
+    const drip = fields.get("drip") === "on";
+    button.disabled = true;
+    try {
+      const response = await apiFetch("/api/transactions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account_id: account.id,
+          transaction_date: fields.get("transaction_date"),
+          transaction_type: drip ? "DRIP" : "BUY",
+          symbol: String(fields.get("symbol") || "").trim().toUpperCase(),
+          market: fields.get("market"),
+          currency: fields.get("currency"),
+          description: fields.get("description") || "",
+          quantity, price, gross_amount: quantity * price,
+        }),
+      });
+      const result = await parseApiResponse(response);
+      await loadSummary();
+      if (transactionsData) await loadTransactions();
+      showMessage(`Recorded ${drip ? "DRIP" : "purchase"} of ${quantity} ${result.transaction.symbol}.${incomeImpactMessage(result.transaction)}`);
+      setTradeDraft(null);
+    } catch (error) {
+      if (error instanceof AuthError) setAuth({ status: "anonymous", username: null, isAdmin: false });
+      showMessage(error.message, true);
     } finally {
       button.disabled = false;
     }
@@ -1190,7 +1245,9 @@ function App() {
           onOpenTransactions={() => activateView("transactions")}
           onOpenImports={() => activateView("imports")}
           onOpenHistory={() => activateView("history")}
+          onOpenIncome={() => activateView("income")}
           onOpenUsers={() => activateView("users")}
+          onOpenCashAdmin={() => activateView("admin-cash")}
           onLogout={handleLogout}
           isAdmin={auth.isAdmin}
         />
@@ -1249,6 +1306,8 @@ function App() {
           {activeView === "stock" && (
             <StockPage
               stock={stockData}
+              holdings={data.holdings || []}
+              onOpenStock={openStock}
               loading={stockLoading}
               error={stockError}
               requestedStock={activeStock}
@@ -1304,14 +1363,25 @@ function App() {
           {activeView === "users" && auth.isAdmin && (
             <UsersAdminPage data={usersData} onSubmit={handleCreateUser} onRefresh={loadUsers} />
           )}
+          {activeView === "admin-cash" && auth.isAdmin && (
+            <CashAdminPage onSaved={loadSummary} />
+          )}
+          {activeView === "income" && <IncomeReportPage isAdmin={auth.isAdmin} />}
         </section>
       </main>
 
-      {tradeDraft ? (
+      {tradeDraft?.holding ? (
         <TradeModal
           account={tradeDraft.account}
           holding={tradeDraft.holding}
           onSubmit={(event) => handleSaveTrade(tradeDraft.account, tradeDraft.holding, event)}
+          onClose={() => setTradeDraft(null)}
+        />
+      ) : tradeDraft ? (
+        <AccountTradeModal
+          account={tradeDraft.account}
+          holdings={(data.holdings || []).filter((holding) => holding.account_id === tradeDraft.account.id && canTradeHolding(holding))}
+          onSubmit={(holding, event) => holding ? handleSaveTrade(tradeDraft.account, holding, event) : handleSaveNewTrade(tradeDraft.account, event)}
           onClose={() => setTradeDraft(null)}
         />
       ) : null}
@@ -1358,7 +1428,9 @@ function SessionMenu({
   onOpenTransactions,
   onOpenImports,
   onOpenHistory,
+  onOpenIncome,
   onOpenUsers,
+  onOpenCashAdmin,
   onLogout,
   isAdmin,
 }) {
@@ -1395,6 +1467,14 @@ function SessionMenu({
             <button type="button" onClick={() => runMenuAction(onOpenHistory)}>
               History
             </button>
+            <button type="button" onClick={() => runMenuAction(onOpenIncome)}>
+              Income
+            </button>
+            {isAdmin ? (
+              <button type="button" onClick={() => runMenuAction(onOpenCashAdmin)}>
+                Cash Balances
+              </button>
+            ) : null}
             {isAdmin ? (
               <button type="button" onClick={() => runMenuAction(onOpenUsers)}>
                 Users
@@ -1524,7 +1604,82 @@ function WatchedStatusIcon() {
   );
 }
 
-function TradeModal({ account, holding, onSubmit, onClose }) {
+function AccountTradeModal({ account, holdings, onSubmit, onClose }) {
+  const [selectedId, setSelectedId] = useState("new");
+  const [market, setMarket] = useState("CDN");
+  const [symbol, setSymbol] = useState("");
+  const [incomeEstimate, setIncomeEstimate] = useState(null);
+  const holding = holdings.find((item) => String(item.id) === selectedId);
+  const currency = market === "US" ? "USD" : "CAD";
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const estimateKey = `${market}:${normalizedSymbol}`;
+  const estimate = incomeEstimate?.key === estimateKey ? incomeEstimate : null;
+  useEffect(() => {
+    if (holding || !normalizedSymbol) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await apiFetch(`/api/stocks/${encodeURIComponent(normalizedSymbol)}/income-estimate?market=${encodeURIComponent(market)}`, { signal: controller.signal });
+        const result = await parseApiResponse(response);
+        if (!controller.signal.aborted) setIncomeEstimate({ key: estimateKey, data: result });
+      } catch (error) {
+        if (!controller.signal.aborted) setIncomeEstimate({ key: estimateKey, error: error.message });
+      }
+    }, 300);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [holding, normalizedSymbol, market, estimateKey]);
+  const estimateStatus = !normalizedSymbol ? "Enter a ticker to look up its dividend income." :
+    !estimate ? "Looking up dividend data…" :
+    estimate.error ? `Could not look up dividend data: ${estimate.error}` : "";
+  return (
+    <TradeModal
+      key={selectedId}
+      account={account}
+      holding={holding || {
+        currency, quantity: 0,
+        annual_forward_dividend: estimate?.data?.annual_dividend_per_share,
+        payments_per_year: estimate?.data?.payments_per_year,
+      }}
+      isNewHolding={!holding}
+      incomeEstimateStatus={!holding ? estimateStatus : ""}
+      onSubmit={(event) => onSubmit(holding, event)}
+      onClose={onClose}
+      selection={
+        <>
+          <label>
+            <span>Holding</span>
+            <select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
+              <option value="new">Buy a new holding</option>
+              {holdings.map((item) => <option key={item.id} value={String(item.id)}>{tickerLabel(item)} — {item.description}</option>)}
+            </select>
+          </label>
+          {!holding ? (
+            <>
+              <label><span>Ticker</span><input name="symbol" type="text" placeholder="e.g. CCA" value={symbol} onChange={(event) => setSymbol(event.target.value)} required /></label>
+              <label><span>Market</span><select name="market" value={market} onChange={(event) => setMarket(event.target.value)}><option value="CDN">Canada</option><option value="US">US</option></select></label>
+              <input name="currency" type="hidden" value={currency} />
+              <label>
+                <span>Company name (optional)</span>
+                <input name="description" type="text" placeholder={estimate?.data?.description || "Uses the name from your existing holdings"} />
+                {estimate?.data?.description && estimate.data.description !== normalizedSymbol ? <span className="row-sub">Leave blank to use {estimate.data.description}.</span> : null}
+              </label>
+            </>
+          ) : null}
+        </>
+      }
+    />
+  );
+}
+
+function TradeModal({ account, holding, onSubmit, onClose, selection, isNewHolding = false, incomeEstimateStatus = "" }) {
+  const [shares, setShares] = useState("");
+  const [drip, setDrip] = useState(false);
+  const addedShares = Number(shares);
+  const currentShares = Number(holding?.quantity || 0);
+  const annualRate = Number(holding?.annual_forward_dividend || 0);
+  const hasIncomeEstimate = Number(holding?.payments_per_year || 0) > 0;
+  const validShares = shares !== "" && Number.isFinite(addedShares) && addedShares !== 0 && currentShares + addedShares >= 0 && (!drip || addedShares > 0);
+  const annualChange = addedShares * annualRate;
   const tradeCurrency = holding?.currency || account?.base_currency || "CAD";
   const defaultPrice = Number(
     holding?.source_price ??
@@ -1543,7 +1698,7 @@ function TradeModal({ account, holding, onSubmit, onClose }) {
       <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="trade-modal-title">
         <div className="modal-heading">
           <div>
-            <h2 id="trade-modal-title">Trade {tickerLabel(holding)}</h2>
+            <h2 id="trade-modal-title">{isNewHolding ? "New holding" : `Trade ${tickerLabel(holding)}`}</h2>
             <p>
               {shortAccountName(account?.name)} - {tradeCurrency} cash {formatCurrency(cashBalance, tradeCurrency)}
             </p>
@@ -1553,22 +1708,38 @@ function TradeModal({ account, holding, onSubmit, onClose }) {
           </button>
         </div>
         <form className="modal-form" onSubmit={onSubmit}>
+          {selection}
           <label>
             <span>Date</span>
             <input name="transaction_date" type="date" defaultValue={todayInputValue()} required />
           </label>
           <label>
             <span>Shares</span>
-            <input name="shares" type="number" step="0.0001" required autoFocus />
+            <input name="shares" type="number" step="0.0001" min={isNewHolding || drip ? "0.0001" : undefined} value={shares} onChange={(event) => setShares(event.target.value)} required autoFocus />
+            <span className="row-sub">{isNewHolding ? "Enter shares purchased or received." : "Positive shares buy; negative shares sell. DRIP adds shares without deducting cash."}</span>
           </label>
           <label>
             <span>Price</span>
             <input name="price" type="number" step="0.01" min="0" defaultValue={defaultPriceText} required />
           </label>
           <label className="checkbox-row modal-checkbox">
-            <input name="drip" type="checkbox" />
+            <input name="drip" type="checkbox" checked={drip} onChange={(event) => setDrip(event.target.checked)} />
             <span>DRIP</span>
           </label>
+          <div className="income-impact-preview" aria-live="polite">
+            <strong>Estimated income impact (CAD)</strong>
+            {incomeEstimateStatus ? <p>{incomeEstimateStatus}</p> : !hasIncomeEstimate ? (
+              <p>Dividend data is unavailable for this holding. Income impact cannot be estimated yet.</p>
+            ) : validShares ? (
+              <>
+                <p>Annual income: {formatMoney(currentShares * annualRate)} → {formatMoney((currentShares + addedShares) * annualRate)}</p>
+                <p className={toneClass(annualChange)}>
+                  {annualChange >= 0 ? "+" : ""}{formatMoney(annualChange)} per year · {annualChange >= 0 ? "+" : ""}{formatMoney(annualChange / 12)} per month
+                </p>
+                <p className="row-sub">Based on current dividend data and exchange rates. Monthly income is an annual average. {drip ? "DRIP leaves cash unchanged." : ""}</p>
+              </>
+            ) : <p>Enter valid shares to see the change in income.</p>}
+          </div>
           <div className="form-actions">
             <button type="submit">Save Trade</button>
             <button className="secondary-button" type="button" onClick={onClose}>
@@ -2359,26 +2530,28 @@ function AccountPage({
 
   return (
     <section className="view active">
-      <div className="account-header">
+      <div className="account-header account-overview-header">
         <div className="account-title">
           <h2>{account.name}</h2>
           <p>{account.report_timestamp || ""}</p>
         </div>
-        <div className="header-actions">
-          <AccountSwitcher account={account} accounts={accounts} onActivate={onActivate} />
-          <div className="account-cash-group">
-            <div className="account-cash-pill">
-              <span>Cash</span>
-              <strong>{formatCashBalances(account)}</strong>
-            </div>
-            <button className="icon-button trade-button" type="button" title="Edit cash" aria-label="Edit cash" onClick={onOpenCash}>
-              <TradeIcon />
-            </button>
-          </div>
-          <button className="quiet-button" onClick={() => onActivate("summary")}>
-            Summary
-          </button>
+        <div className="account-value">
+          <span>Account value · CAD</span>
+          <strong>{formatMoney(account.current_total_value ?? account.total_closing_value)}</strong>
         </div>
+        <div className="account-overview-actions">
+          <button className="account-cash-button" type="button" title="Edit cash balances" onClick={onOpenCash}>
+            <span>Cash <span className="cash-edit-hint">Edit</span></span>
+            <strong>{formatCashBalances(account)}</strong>
+          </button>
+          {!isPrivateFund ? (
+            <button className="account-trade-button" type="button" onClick={() => onOpenTrade(null)}>
+              <TradeIcon />
+              Trade
+            </button>
+          ) : null}
+        </div>
+        <AccountSwitcher account={account} accounts={accounts} onActivate={onActivate} />
       </div>
 
       {isPrivateFund ? (
@@ -2451,7 +2624,7 @@ function AccountSwitcher({ account, accounts, onActivate }) {
 
   return (
     <label className="account-switcher">
-      <span>Account</span>
+      <span>Switch account</span>
       <select
         value={String(account.id)}
         onChange={(event) => {
@@ -2463,7 +2636,7 @@ function AccountSwitcher({ account, accounts, onActivate }) {
       >
         {accountOptions.map((option) => (
           <option key={option.id} value={String(option.id)}>
-            {shortAccountName(option.name)} - {formatMoney(option.current_total_value ?? option.total_closing_value)}
+            {shortAccountName(option.name)}
           </option>
         ))}
       </select>
@@ -2695,7 +2868,7 @@ function StockDividendChart({ dividends, currency }) {
   );
 }
 
-function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh }) {
+function StockPage({ stock, holdings, requestedStock, loading, error, onBack, onRefresh, onOpenStock }) {
   const displaySymbol = stock?.yahoo_symbol || requestedStock?.symbol || "Stock";
   const currency = stock?.currency || "CAD";
   const stats = stock?.stats || {};
@@ -2704,15 +2877,51 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
   const accounts = stock?.holdings?.accounts || [];
   const forecastStartDate = stock?.fetched_at || todayInputValue();
   const dividendGrowthPct = stats.five_year_dividend_growth_pct;
+  const securityOptions = useMemo(() => {
+    const unique = new Map();
+    for (const holding of holdings || []) {
+      if (!canOpenStock(holding)) continue;
+      const key = securitySelectionKey(holding);
+      const existing = unique.get(key);
+      if (!existing || ((!existing.description || existing.description === existing.symbol) && holding.description)) {
+        unique.set(key, holding);
+      }
+    }
+    if (requestedStock && !unique.has(securitySelectionKey(requestedStock))) {
+      unique.set(securitySelectionKey(requestedStock), requestedStock);
+    }
+    return [...unique.values()].sort((left, right) =>
+      (left.description || left.symbol).localeCompare(right.description || right.symbol, undefined, { sensitivity: "base" }) ||
+      tickerLabel(left).localeCompare(tickerLabel(right))
+    );
+  }, [holdings, requestedStock]);
 
   return (
     <section className="view active">
       <div className="account-header">
         <div>
           <h2>{displaySymbol}</h2>
-          <p>{stock?.description || "Stock analytics"}</p>
+          <p>{stock?.description || requestedStock?.description || "Stock analytics"}</p>
         </div>
         <div className="header-actions">
+          <label className="security-switcher">
+            <span>Holding</span>
+            <select
+              value={securitySelectionKey(requestedStock)}
+              onChange={(event) => {
+                const holding = securityOptions.find((option) => securitySelectionKey(option) === event.target.value);
+                if (holding) onOpenStock(holding);
+              }}
+            >
+              {securityOptions.map((holding) => (
+                <option key={securitySelectionKey(holding)} value={securitySelectionKey(holding)}>
+                  {holding.description && holding.description !== holding.symbol
+                    ? `${holding.description} (${tickerLabel(holding)})`
+                    : tickerLabel(holding)}
+                </option>
+              ))}
+            </select>
+          </label>
           <button className="quiet-button" type="button" onClick={onBack}>
             Summary
           </button>
@@ -2839,6 +3048,130 @@ function StockPage({ stock, requestedStock, loading, error, onBack, onRefresh })
           </div>
         </>
       ) : null}
+    </section>
+  );
+}
+
+function CashAdminPage({ onSaved }) {
+  const [accounts, setAccounts] = useState(null);
+  const [drafts, setDrafts] = useState({});
+  const [statuses, setStatuses] = useState({});
+  const [message, setMessage] = useState("");
+  const currentAccounts = useRef([]);
+  const pending = useRef(new Set());
+  const queue = useRef(Promise.resolve());
+  const currencies = ["CAD", "USD"];
+  const keyFor = (id, currency) => `${id}:${currency}`;
+
+  async function refresh() {
+    try {
+      const response = await apiFetch("/api/admin/cash");
+      const result = await parseApiResponse(response);
+      currentAccounts.current = sortAccountsForDisplay(result.accounts);
+      setAccounts(currentAccounts.current);
+      setDrafts({});
+      setStatuses({});
+      setMessage("");
+    } catch (error) { setMessage(error.message); }
+  }
+  useEffect(() => { refresh(); }, []);
+
+  function parseAmount(raw) {
+    const text = String(raw).trim().replace(/[$,]/g, "");
+    if (!text || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) throw new Error("Enter a numeric cash balance. Use 0 to clear a balance.");
+    const value = Number(text);
+    if (!Number.isFinite(value)) throw new Error("Enter a finite cash balance.");
+    return Math.round(value * 100) / 100;
+  }
+
+  function saveCells(cells) {
+    const updates = cells.filter((cell) => !pending.current.has(keyFor(cell.account_id, cell.currency))).map((cell) => ({
+      ...cell,
+      expected_amount: cashAmountForCurrency(currentAccounts.current.find((account) => account.id === cell.account_id), cell.currency),
+    })).filter((cell) => Math.abs(cell.amount - cell.expected_amount) > .005);
+    if (!updates.length) return;
+    updates.forEach((cell) => pending.current.add(keyFor(cell.account_id, cell.currency)));
+    setStatuses((previous) => ({ ...previous, ...Object.fromEntries(updates.map((cell) => [keyFor(cell.account_id, cell.currency), "Saving…"])) }));
+    queue.current = queue.current.then(async () => {
+      try {
+        const response = await apiFetch("/api/admin/cash", {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ updates }),
+        });
+        const result = await parseApiResponse(response);
+        currentAccounts.current = sortAccountsForDisplay(result.accounts);
+        setAccounts(currentAccounts.current);
+        setDrafts((previous) => {
+          const next = { ...previous };
+          updates.forEach((cell) => delete next[keyFor(cell.account_id, cell.currency)]);
+          return next;
+        });
+        setStatuses((previous) => ({ ...previous, ...Object.fromEntries(updates.map((cell) => [keyFor(cell.account_id, cell.currency), "Saved"])) }));
+        setMessage("");
+        try { await onSaved(); } catch (error) { setMessage(`Cash saved. Could not refresh portfolio: ${error.message}`); }
+      } catch (error) {
+        setMessage(error.message);
+        setStatuses((previous) => ({ ...previous, ...Object.fromEntries(updates.map((cell) => [keyFor(cell.account_id, cell.currency), "Not saved"])) }));
+      } finally {
+        updates.forEach((cell) => pending.current.delete(keyFor(cell.account_id, cell.currency)));
+      }
+    });
+  }
+
+  function commit(account, currency, raw) {
+    try { saveCells([{ account_id: account.id, currency, amount: parseAmount(raw) }]); }
+    catch (error) { setMessage(error.message); }
+  }
+
+  function paste(event, rowIndex, columnIndex) {
+    event.preventDefault();
+    try {
+      const rows = event.clipboardData.getData("text/plain").replace(/\r/g, "").replace(/\n+$/, "").split("\n").map((row) => row.split("\t"));
+      if (rowIndex + rows.length > accounts.length || rows.some((row) => columnIndex + row.length > 2)) throw new Error("The pasted cells extend beyond the cash grid. Paste up to two columns: CAD, then USD.");
+      const cells = rows.flatMap((row, offset) => row.map((raw, col) => ({ account_id: accounts[rowIndex + offset].id, currency: currencies[columnIndex + col], amount: parseAmount(raw) })));
+      if (cells.some((cell) => pending.current.has(keyFor(cell.account_id, cell.currency)))) throw new Error("Wait for these cells to finish saving before pasting again.");
+      setDrafts((previous) => ({ ...previous, ...Object.fromEntries(cells.map((cell) => [keyFor(cell.account_id, cell.currency), cell.amount.toFixed(2)])) }));
+      saveCells(cells);
+    } catch (error) { setMessage(error.message); }
+  }
+
+  const saving = Object.values(statuses).includes("Saving…");
+  return (
+    <section className="view active section-panel">
+      <div className="panel-heading"><h2>Cash Balances</h2><button className="quiet-button" type="button" disabled={saving} onClick={refresh}>Refresh balances</button></div>
+      <p>Edit a cell and press Enter or Tab to save. Paste numeric cells from Excel into the CAD or USD columns. Escape cancels an edit. Balances are in each column’s currency.</p>
+      {message ? <div className="message error" role="alert">{message}</div> : null}
+      <div className="table-wrap">
+        <table className="cash-admin-table">
+          <thead><tr><th>Account</th><th>Entity</th><th className="numeric">CAD Cash</th><th className="numeric">USD Cash</th><th className="numeric">Total Cash (CAD)</th></tr></thead>
+          <tbody>
+            {!accounts ? <tr><td colSpan="5">Loading balances…</td></tr> : accounts.map((account, rowIndex) => (
+              <tr key={account.id}>
+                <td>{account.name}</td><td>{accountEntity(account)}</td>
+                {currencies.map((currency, columnIndex) => {
+                  const key = keyFor(account.id, currency);
+                  return <td key={currency} className="numeric">
+                    <input className="history-edit-input" type="text" inputMode="decimal" aria-label={`${account.name} ${currency} cash`} aria-invalid={statuses[key] === "Not saved"} data-cash-cell={`${rowIndex}:${columnIndex}`} value={drafts[key] ?? cashAmountForCurrency(account, currency).toFixed(2)} readOnly={statuses[key] === "Saving…"}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onChange={(event) => setDrafts((previous) => ({ ...previous, [key]: event.target.value }))}
+                      onBlur={(event) => commit(account, currency, event.target.value)}
+                      onPaste={(event) => paste(event, rowIndex, columnIndex)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") { event.preventDefault(); setDrafts((previous) => { const next = { ...previous }; delete next[key]; return next; }); }
+                        if (event.key === "Enter") {
+                          event.preventDefault(); event.currentTarget.blur();
+                          document.querySelector(`[data-cash-cell="${rowIndex + 1}:${columnIndex}"]`)?.focus();
+                        }
+                      }} />
+                    <div className="row-sub" role="status">{statuses[key] || ""}</div>
+                  </td>;
+                })}
+                <td className="numeric">{formatMoney((account.cash_balances || []).reduce((sum, item) => sum + Number(item.value_cad || 0), 0))}</td>
+              </tr>
+            ))}
+          </tbody>
+          {accounts ? <tfoot><tr><th>Total</th><td /><th className="numeric">{formatCurrency(accounts.reduce((sum, account) => sum + cashAmountForCurrency(account, "CAD"), 0), "CAD")}</th><th className="numeric">{formatCurrency(accounts.reduce((sum, account) => sum + cashAmountForCurrency(account, "USD"), 0), "USD")}</th><th className="numeric">{formatMoney(accounts.reduce((sum, account) => sum + (account.cash_balances || []).reduce((cash, item) => cash + Number(item.value_cad || 0), 0), 0))}</th></tr></tfoot> : null}
+        </table>
+      </div>
     </section>
   );
 }
@@ -2978,6 +3311,8 @@ function AccountsSetupPage({ accounts, editingAccount, onSubmit, onEdit, onCance
 }
 
 function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
+  const [transactionType, setTransactionType] = useState("DIVIDEND");
+  const addsShares = ["BUY", "DRIP"].includes(transactionType);
   const orderedAccounts = sortAccountsForDisplay(accounts);
   const transactions = data?.transactions || [];
   const firstAccountId = orderedAccounts[0]?.id || "";
@@ -2985,7 +3320,7 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
   return (
     <section className="view active">
       <section className="summary-grid transaction-layout">
-        <form className="section-panel account-setup-form transaction-form" onSubmit={onSubmit}>
+        <form className="section-panel account-setup-form transaction-form" onSubmit={onSubmit} onReset={() => setTransactionType("DIVIDEND")}>
           <div className="panel-heading">
             <h2>New Transaction</h2>
           </div>
@@ -3006,7 +3341,7 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
             </label>
             <label>
               <span>Type</span>
-              <select name="transaction_type" defaultValue="DIVIDEND">
+              <select name="transaction_type" value={transactionType} onChange={(event) => setTransactionType(event.target.value)}>
                 {transactionTypes.map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
@@ -3015,10 +3350,15 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
               </select>
             </label>
           </div>
+          <p className="row-sub">
+            {transactionType === "DIVIDEND" ? "Dividend records cash received; it does not add shares. Choose DRIP for reinvested shares." :
+              transactionType === "DRIP" ? "DRIP adds the new shares received and leaves cash unchanged. Quantity and purchase price are required." :
+              transactionType === "BUY" ? "Buy adds shares and deducts the purchase from cash. Quantity and purchase price are required." : ""}
+          </p>
           <div className="transaction-form-grid">
             <label>
               <span>Ticker</span>
-              <input name="symbol" type="text" autoComplete="off" />
+              <input name="symbol" type="text" autoComplete="off" required={addsShares} />
             </label>
             <label>
               <span>Market</span>
@@ -3046,13 +3386,13 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
             </label>
             <label>
               <span>Qty</span>
-              <input name="quantity" type="number" step="0.0001" />
+              <input name="quantity" type="number" step="0.0001" min={addsShares ? "0.0001" : undefined} required={addsShares} />
             </label>
           </div>
           <div className="transaction-form-grid">
             <label>
               <span>Price</span>
-              <input name="price" type="number" step="0.0001" />
+              <input name="price" type="number" step="0.0001" min={addsShares ? "0.0001" : undefined} required={addsShares} />
             </label>
             <label>
               <span>Dividend/share</span>
@@ -3111,13 +3451,14 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
                   <th className="numeric">Fees</th>
                   <th className="numeric">Tax</th>
                   <th className="numeric">Net Cash</th>
+                  <th className="numeric">Annual Income Δ (CAD)</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {!data ? (
                   <tr>
-                    <td className="empty-state" colSpan="13">
+                    <td className="empty-state" colSpan="14">
                       Loading transactions...
                     </td>
                   </tr>
@@ -3142,6 +3483,14 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
                       <td className={`numeric ${toneClass(transaction.net_amount)}`}>
                         {formatCurrency(transaction.net_amount, transaction.currency)}
                       </td>
+                      <td className={`numeric ${toneClass(transaction.income_impact?.annual_income_change)}`}>
+                        {transaction.income_impact ? (
+                          <div title={`Annual income: ${formatMoney(transaction.income_impact.annual_income_before)} → ${formatMoney(transaction.income_impact.annual_income_after)}. Estimate saved when recorded.`}>
+                            {transaction.income_impact.annual_income_change >= 0 ? "+" : ""}{formatMoney(transaction.income_impact.annual_income_change)}
+                            <div className="row-sub">{formatMoney(transaction.income_impact.monthly_income_change)} / month</div>
+                          </div>
+                        ) : <span title="No income estimate was saved for this transaction">—</span>}
+                      </td>
                       <td className="numeric">
                         <button className="quiet-button compact-button" type="button" onClick={() => onDelete(transaction.id)}>
                           Remove
@@ -3151,7 +3500,7 @@ function TransactionsPage({ data, accounts, onSubmit, onDelete, onRefresh }) {
                   ))
                 ) : (
                   <tr>
-                    <td className="empty-state" colSpan="13">
+                    <td className="empty-state" colSpan="14">
                       No transactions recorded yet.
                     </td>
                   </tr>
@@ -3410,8 +3759,76 @@ function HistoryPage({ data, accounts, fileLabel, onFileChange, onUpload, onUpda
   );
 }
 
-function HistoryChart({ snapshots }) {
-  const points = [...snapshots].reverse().filter((snapshot) => Number(snapshot.total_value || 0) > 0);
+function IncomeReportPage({ isAdmin }) {
+  const [report, setReport] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedWeek, setSelectedWeek] = useState(null);
+
+  async function load(save = false) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await apiFetch(save ? "/api/income/snapshots/today" : "/api/income/weekly", { method: save ? "POST" : "GET" });
+      setReport(await parseApiResponse(response));
+    } catch (failure) { setError(failure.message); }
+    finally { setBusy(false); }
+  }
+  useEffect(() => { load(); }, []);
+  const weeks = report?.weeks || [];
+  const latest = weeks[0];
+  const selected = weeks.find((week) => week.week_start === selectedWeek) || latest;
+  const changeText = (value) => value == null ? "—" : `${value >= 0 ? "+" : ""}${formatMoney(value)}`;
+
+  return (
+    <section className="view active">
+      <section className="section-panel">
+        <div className="panel-heading">
+          <h2>Weekly Dividend Income</h2>
+          <div className="row-actions">
+            <button className="quiet-button" type="button" disabled={busy} onClick={() => load()}>Refresh</button>
+            {isAdmin ? <button className="quiet-button" type="button" disabled={busy} onClick={() => load(true)}>Save today’s snapshot</button> : null}
+          </div>
+        </div>
+        <p>Estimated annual dividend income in CAD, using your recorded shares and latest dividend data. Monthly figures are annual averages. Cash interest and private-fund distributions are excluded.</p>
+        {error ? <div className="message error" role="alert">{error}</div> : null}
+        {!report ? <p>{busy ? "Loading income…" : "Income report unavailable."}</p> : (
+          <>
+            <div className="summary-grid">
+              <div className="section-panel"><span>Current annual income</span><h2>{formatMoney(latest.annual_income)}</h2><div className="row-sub">{formatMoney(latest.monthly_income)} / month on average</div></div>
+              <div className="section-panel"><span>{latest.comparison_weeks === 1 ? "Change from last week" : "Change since previous saved week"}</span><h2 className={toneClass(latest.change)}>{changeText(latest.change)}</h2><div className="row-sub">{latest.change_pct != null ? formatSignedPercent(latest.change_pct) : ""} {latest.comparison_date ? `Compared with ${formatMarketDate(latest.comparison_date)}` : "A previous week’s snapshot is needed."}</div></div>
+            </div>
+            {!report.first_saved_date ? <p>No income history has been saved yet. Automatic snapshots begin while the background worker runs; you can save today’s baseline now.</p> : <p className="row-sub">Saved income history begins {formatMarketDate(report.first_saved_date)}. Earlier weeks are not reconstructed. Weeks run Monday through Sunday; this week uses live estimates.</p>}
+            {weeks.length > 1 ? <HistoryChart snapshots={weeks.map((week) => ({ ...week, total_value: week.annual_income }))} ariaLabel="Estimated annual dividend income by week" includeZero /> : null}
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Week of</th><th>As of</th><th className="numeric">Annual Income</th><th className="numeric">Monthly Average</th><th className="numeric">Change</th><th className="numeric">Change %</th><th>Comparison</th></tr></thead>
+                <tbody>{weeks.map((week) => <tr key={week.week_start}>
+                  <td><button className="quiet-button" type="button" aria-pressed={selected.week_start === week.week_start} onClick={() => setSelectedWeek(week.week_start)}>{formatMarketDate(week.week_start)}</button></td>
+                  <td>{formatMarketDate(week.market_date)}{week.source === "live" ? " (live)" : ""}</td>
+                  <td className="numeric">{formatMoney(week.annual_income)}</td><td className="numeric">{formatMoney(week.monthly_income)}</td>
+                  <td className={`numeric ${toneClass(week.change)}`}>{changeText(week.change)}</td><td className="numeric">{week.change_pct == null ? "—" : formatSignedPercent(week.change_pct)}</td>
+                  <td>{week.comparison_weeks == null ? "Baseline" : week.comparison_weeks === 1 ? "Previous week" : `${week.comparison_weeks} weeks since last saved week`}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+      {selected ? <section className="section-panel">
+        <div className="panel-heading"><h2>By Account — Week of {formatMarketDate(selected.week_start)}</h2></div>
+        <div className="table-wrap"><table><thead><tr><th>Account</th><th>Entity</th><th className="numeric">Previous Annual Income</th><th className="numeric">Annual Income</th><th className="numeric">Change</th></tr></thead>
+          <tbody>{sortAccountsForDisplay(selected.account_changes.map((account) => ({ ...account, name: account.account_name }))).map((account) => <tr key={account.account_id}>
+            <td>{account.account_name}</td><td>{account.account_entity}</td><td className="numeric">{account.previous_annual_income == null ? "—" : formatMoney(account.previous_annual_income)}</td><td className="numeric">{formatMoney(account.annual_income)}</td><td className={`numeric ${toneClass(account.change)}`}>{changeText(account.change)}</td>
+          </tr>)}</tbody></table></div>
+        <p className="row-sub">Changes reflect share purchases, sales, DRIPs, updated dividend estimates, and exchange rates.</p>
+      </section> : null}
+    </section>
+  );
+}
+
+function HistoryChart({ snapshots, ariaLabel = "Saved balance history chart", includeZero = false }) {
+  const points = [...snapshots].reverse().filter((snapshot) => includeZero ? Number.isFinite(Number(snapshot.total_value)) : Number(snapshot.total_value || 0) > 0);
   if (points.length < 2) {
     return <div className="empty-state">At least two saved closes are needed for a chart.</div>;
   }
@@ -3436,7 +3853,7 @@ function HistoryChart({ snapshots }) {
 
   return (
     <div className="history-chart-wrap">
-      <svg className="history-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Saved balance history chart">
+      <svg className="history-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={ariaLabel}>
         {[0, 0.5, 1].map((step) => {
           const value = min + range * step;
           const lineY = y(value);

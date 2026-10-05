@@ -28,6 +28,10 @@ from server import (
     delete_fundamentals_watchlist_stock,
     ensure_auth_user,
     get_accounts,
+    get_dividend_income_estimate,
+    get_weekly_income_report,
+    income_snapshot_source,
+    save_income_snapshot,
     get_balance_snapshots,
     get_fundamentals,
     get_stock_detail,
@@ -53,6 +57,7 @@ from server import (
     update_balance_snapshot_values,
     update_latest_cash_balance,
     update_latest_cash_balances,
+    update_admin_cash_cells,
 )
 
 
@@ -169,6 +174,17 @@ class AccountTradePayload(BaseModel):
 
 class CashBalancesPayload(BaseModel):
     cash_balances: list[CashBalancePayload]
+
+
+class CashCellPayload(BaseModel):
+    account_id: int
+    currency: str
+    amount: float
+    expected_amount: float
+
+
+class AdminCashPayload(BaseModel):
+    updates: list[CashCellPayload]
 
 
 class HoldingOrderPayload(BaseModel):
@@ -311,19 +327,27 @@ def local_date_from_iso(value: str | None) -> str | None:
 
 def maybe_save_end_of_day_snapshot():
     market_date = snapshot_market_date_for_now()
-    if not market_date or balance_snapshot_exists(market_date):
+    if not market_date:
         return None
 
     status = latest_price_status()
     if local_date_from_iso(status.get("latest_fetched_at")) != market_date:
         return None
 
-    return save_balance_snapshot(market_date, source="auto")
+    result = None
+    if not balance_snapshot_exists(market_date):
+        result = save_balance_snapshot(market_date, source="auto")
+    if income_snapshot_source(market_date) != "auto":
+        save_income_snapshot(market_date, source="auto")
+    return result
 
 
 def price_refresh_loop():
     while not price_refresh_stop.is_set():
         try:
+            today = datetime.now(PRICE_REFRESH_TIMEZONE).date().isoformat()
+            if income_snapshot_source(today) is None:
+                save_income_snapshot(today, source="baseline")
             if is_price_refresh_window():
                 refresh_current_prices()
             else:
@@ -485,6 +509,32 @@ def account_trade(account_id: int, payload: AccountTradePayload, username: str =
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/income/weekly")
+def weekly_income(username: str = Depends(require_auth)):
+    today = datetime.now(PRICE_REFRESH_TIMEZONE).date().isoformat()
+    return get_weekly_income_report(today)
+
+
+@app.post("/api/income/snapshots/today")
+def save_today_income(username: str = Depends(require_admin)):
+    today = datetime.now(PRICE_REFRESH_TIMEZONE).date().isoformat()
+    save_income_snapshot(today)
+    return get_weekly_income_report(today)
+
+
+@app.get("/api/admin/cash")
+def admin_cash(username: str = Depends(require_admin)):
+    return {"accounts": get_accounts()}
+
+
+@app.patch("/api/admin/cash")
+def edit_admin_cash(payload: AdminCashPayload, username: str = Depends(require_admin)):
+    try:
+        return update_admin_cash_cells([item.dict() for item in payload.updates])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.delete("/api/accounts/{account_id}")
 def remove_account(account_id: int, username: str = Depends(require_admin)):
     try:
@@ -549,6 +599,14 @@ def price_status(username: str = Depends(require_auth)):
 @app.post("/api/prices/refresh")
 def refresh_prices(username: str = Depends(require_auth)):
     return refresh_current_prices()
+
+
+@app.get("/api/stocks/{symbol}/income-estimate")
+def dividend_income_estimate(symbol: str, market: str = "CDN", username: str = Depends(require_auth)):
+    try:
+        return get_dividend_income_estimate(symbol, market)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/stocks/{symbol}")

@@ -573,6 +573,14 @@ def init_db():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS income_snapshots (
+                market_date TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS account_balance_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 market_date TEXT NOT NULL,
@@ -1592,6 +1600,34 @@ def manual_holding_values(row, usd_cad_rate=1.0):
     }
 
 
+def known_security_description(conn, symbol, market, description=""):
+    symbol = str(symbol or "").strip().upper()
+    market = str(market or "").strip().upper()
+    description = str(description or "").strip()
+    if description and description.upper() != symbol:
+        return description
+    if not symbol:
+        return description
+    row = conn.execute(
+        """
+        SELECT description FROM (
+            SELECT description, id,
+                   CASE WHEN batch_id IN (SELECT MAX(id) FROM import_batches GROUP BY account_id)
+                        THEN 0 ELSE 1 END AS priority
+            FROM holdings
+            WHERE UPPER(TRIM(symbol)) = ? AND UPPER(TRIM(COALESCE(market, ''))) = ?
+            UNION ALL
+            SELECT description, id, 2 AS priority FROM manual_holdings
+            WHERE UPPER(TRIM(symbol)) = ? AND UPPER(TRIM(COALESCE(market, ''))) = ?
+        )
+        WHERE TRIM(COALESCE(description, '')) != '' AND UPPER(TRIM(description)) != ?
+        ORDER BY priority, id DESC LIMIT 1
+        """,
+        (symbol, market, symbol, market, symbol),
+    ).fetchone()
+    return str(row["description"]).strip() if row else symbol
+
+
 def current_manual_holding_filter_sql():
     # A new statement replaces a manual position for the same security, even
     # when the imported position has since been sold down to zero shares.
@@ -1637,7 +1673,7 @@ def manual_holding_summary_rows(conn, usd_cad_rate=1.0):
                 "currency": normalize_currency(row["currency"]),
                 "symbol": str(row["symbol"] or "").strip().upper(),
                 "market": str(row["market"] or "").strip().upper(),
-                "description": row["description"] or row["symbol"],
+                "description": known_security_description(conn, row["symbol"], row["market"], row["description"]),
                 "quantity": values["quantity"],
                 "average_cost": values["average_cost"],
                 "closing_price": values["closing_price"],
@@ -1808,6 +1844,9 @@ def list_transactions(account_id=None, limit=250):
             params,
         ).fetchall()
 
+    for row in rows:
+        effect = parse_position_effect_json(row.get("position_effect_json")) or {}
+        row["income_impact"] = effect.get("income_impact")
     return {"transactions": rows}
 
 
@@ -1856,7 +1895,65 @@ def save_transaction(
     return {"transaction": get_transaction(transaction_id), "position_effect": transaction_effect, **list_transactions()}
 
 
+def cached_dividend_income_rate(conn, symbol, market, currency):
+    dividends = conn.execute(
+        "SELECT ex_date, dividend_per_share FROM stock_dividend_history WHERE yahoo_symbol = ? ORDER BY ex_date",
+        (yahoo_symbol_for(symbol, market),),
+    ).fetchall()
+    stats = annual_forward_dividend_stats(dividends)
+    if not stats["payments_per_year"]:
+        return None
+    currency = normalize_currency(currency)
+    if currency not in {"CAD", "USD"}:
+        return None
+    fx = latest_usd_cad_rate_from_conn(conn) if currency == "USD" else 1.0
+    return {
+        "annual_dividend_per_share": stats["annual_forward_dividend"] * fx,
+        "payments_per_year": stats["payments_per_year"],
+        "latest_ex_date": stats["latest_ex_date"],
+        "source_currency": currency, "fx_to_cad": fx,
+    }
+
+
+def get_dividend_income_estimate(symbol, market="CDN"):
+    init_db()
+    symbol = str(symbol or "").strip().upper()
+    market = str(market or "CDN").strip().upper()
+    if not symbol:
+        raise ValueError("Ticker is required.")
+    with get_connection() as conn:
+        rate = cached_dividend_income_rate(conn, symbol, market, stock_currency_for(market))
+        description = known_security_description(conn, symbol, market)
+    return {"symbol": symbol, "market": market, "description": description, "currency": "CAD", "available": rate is not None, **(rate or {})}
+
+
+def estimated_trade_income_impact(conn, effect):
+    if effect.get("kind") not in {"holding", "manual_holding"}:
+        return None
+    table = "holdings" if effect["kind"] == "holding" else "manual_holdings"
+    holding = conn.execute(f"SELECT quantity FROM {table} WHERE id = ?", (effect["holding_id"],)).fetchone()
+    if not holding:
+        return None
+    estimate = cached_dividend_income_rate(conn, effect.get("symbol"), effect.get("market"), effect.get("currency"))
+    if estimate is None:
+        return None
+    rate = estimate["annual_dividend_per_share"]
+    after = money_value(holding["quantity"])
+    delta = money_value(effect.get("quantity_delta"))
+    return {
+        "currency": "CAD", **estimate,
+        "estimated_at": utc_now(),
+        "shares_before": after - delta, "shares_after": after,
+        "annual_income_before": (after - delta) * rate,
+        "annual_income_after": after * rate,
+        "annual_income_change": delta * rate,
+        "monthly_income_change": delta * rate / 12,
+    }
+
+
 def set_transaction_position_effect(conn, transaction_id, position_effect, now=None):
+    if "income_impact" not in position_effect:
+        position_effect["income_impact"] = estimated_trade_income_impact(conn, position_effect)
     conn.execute(
         """
         UPDATE portfolio_transactions
@@ -1878,12 +1975,12 @@ def purchase_transaction_values(transaction):
 
     symbol = str(transaction.get("symbol") or "").strip().upper()
     if not symbol:
-        return None
+        raise ValueError("Buy and DRIP transactions require a ticker.")
 
     quantity = money_value(transaction.get("quantity"))
     price = money_value(transaction.get("price"))
     if quantity <= 0 or price <= 0:
-        return None
+        raise ValueError("Buy and DRIP transactions require a quantity and price greater than zero.")
 
     return {
         "transaction_type": transaction_type,
@@ -2329,6 +2426,7 @@ def insert_portfolio_transaction(
     account = conn.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone()
     if not account:
         raise ValueError("Account not found.")
+    clean_description = known_security_description(conn, clean_symbol, clean_market, description)
     cursor = conn.execute(
         """
         INSERT INTO portfolio_transactions (
@@ -2344,7 +2442,7 @@ def insert_portfolio_transaction(
             clean_type,
             clean_symbol,
             clean_market,
-            str(description or "").strip(),
+            clean_description,
             clean_currency,
             clean_quantity,
             clean_price,
@@ -2378,6 +2476,9 @@ def get_transaction(transaction_id):
             """,
             (transaction_id,),
         ).fetchone()
+    if row:
+        effect = parse_position_effect_json(row.get("position_effect_json")) or {}
+        row["income_impact"] = effect.get("income_impact")
     return row
 
 
@@ -2580,6 +2681,45 @@ def update_latest_cash_balances(account_id, cash_balances=None):
         result = set_latest_cash_balances_for_account(conn, account_id, normalized_balances, now)
 
     return {"updated": True, **result}
+
+
+def update_admin_cash_cells(updates):
+    init_db()
+    if not updates:
+        raise ValueError("No cash updates supplied.")
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        by_account = {}
+        seen = set()
+        for update in updates:
+            account_id = int(update["account_id"])
+            currency = str(update["currency"]).strip().upper()
+            amount = finite_float(update["amount"])
+            expected = finite_float(update["expected_amount"])
+            if currency not in {"CAD", "USD"} or amount is None or expected is None:
+                raise ValueError("Cash cells require a finite CAD or USD amount.")
+            if (account_id, currency) in seen:
+                raise ValueError("A cash cell was supplied more than once.")
+            seen.add((account_id, currency))
+            if account_id not in by_account:
+                if not conn.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone():
+                    raise ValueError("Account not found.")
+                batch = latest_batch_for_account(conn, account_id)
+                by_account[account_id] = {
+                    item["currency"]: item["amount"]
+                    for item in cash_balances_for_batch(conn, batch["id"])
+                } if batch else {}
+            balances = by_account[account_id]
+            if abs(balances.get(currency, 0) - expected) > 0.005:
+                raise ValueError("Cash changed since this screen loaded. Refresh the balances and try again.")
+            balances[currency] = round(amount, 2)
+        for account_id, balances in by_account.items():
+            set_latest_cash_balances_for_account(
+                conn, account_id,
+                [{"currency": currency, "amount": amount} for currency, amount in balances.items()],
+                utc_now(),
+            )
+    return {"accounts": get_accounts()}
 
 
 def update_latest_cash_balance(account_id, cash_balance=None, cash_currency: str = "CAD"):
@@ -5162,7 +5302,7 @@ def ensure_stock_analytics_cache_for_holdings(holdings):
     cached = {
         row["yahoo_symbol"]
         for row in existing
-        if row["status"] == "ok" or not stock_cache_is_stale(row)
+        if not stock_cache_is_stale(row)
     }
     missing = [target for yahoo_symbol, target in targets.items() if yahoo_symbol not in cached]
     for target in missing:
@@ -5850,6 +5990,87 @@ def get_fundamentals(refresh=False):
 
     rows.sort(key=lambda row: row["symbol"])
     return {"rows": rows, "eps_years": eps_years, "fetched_at": utc_now()}
+
+
+def income_snapshot_source(market_date):
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute("SELECT source FROM income_snapshots WHERE market_date = ?", (market_date,)).fetchone()
+    return row["source"] if row else None
+
+
+def build_income_snapshot(summary, market_date, source):
+    accounts = {
+        account["id"]: {"account_id": account["id"], "account_name": account["name"],
+                        "account_entity": account.get("account_entity") or "Personal", "annual_income": 0.0}
+        for account in summary["accounts"]
+    }
+    holdings = []
+    for holding in summary["holdings"]:
+        if str(holding.get("asset_type") or "").lower() in {"cash", "private fund"}:
+            continue
+        income = money_value(holding.get("annual_forward_income"))
+        holdings.append({
+            "account_id": holding["account_id"], "symbol": holding["symbol"],
+            "market": holding["market"], "description": holding["description"],
+            "quantity": holding.get("quantity"),
+            "annual_dividend_per_share": holding.get("annual_forward_dividend"),
+            "fx_to_cad": holding.get("fx_to_cad"), "annual_income": income,
+        })
+        accounts[holding["account_id"]]["annual_income"] += income
+    total = sum(account["annual_income"] for account in accounts.values())
+    return {"market_date": market_date, "source": source, "annual_income": total,
+            "monthly_income": total / 12, "accounts": list(accounts.values()), "holdings": holdings}
+
+
+def save_income_snapshot(market_date, source="manual"):
+    init_db()
+    date_text = datetime.strptime(market_date, "%Y-%m-%d").date().isoformat()
+    snapshot = build_income_snapshot(get_summary(), date_text, source)
+    now = utc_now()
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO income_snapshots (market_date, source, snapshot_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT(market_date) DO UPDATE SET
+            source = excluded.source, snapshot_json = excluded.snapshot_json, updated_at = excluded.updated_at""",
+            (date_text, source, json.dumps(snapshot), now, now),
+        )
+    return snapshot
+
+
+def get_weekly_income_report(today):
+    init_db()
+    today_date = datetime.strptime(today, "%Y-%m-%d").date()
+    with get_connection() as conn:
+        rows = conn.execute("SELECT snapshot_json FROM income_snapshots WHERE market_date <= ? ORDER BY market_date", (today,)).fetchall()
+    snapshots = [json.loads(row["snapshot_json"]) for row in rows]
+    current = build_income_snapshot(get_summary(), today, "live")
+    weekly = {}
+    for snapshot in [*snapshots, current]:
+        day = datetime.strptime(snapshot["market_date"], "%Y-%m-%d").date()
+        week_start = (day - timedelta(days=day.weekday())).isoformat()
+        weekly[week_start] = {**snapshot, "week_start": week_start}
+    ordered = sorted(weekly.values(), key=lambda row: row["week_start"])
+    previous = None
+    for row in ordered:
+        row["change"] = row["annual_income"] - previous["annual_income"] if previous else None
+        row["change_pct"] = row["change"] / previous["annual_income"] * 100 if previous and previous["annual_income"] else None
+        row["comparison_date"] = previous["market_date"] if previous else None
+        row["comparison_weeks"] = (datetime.strptime(row["week_start"], "%Y-%m-%d").date() - datetime.strptime(previous["week_start"], "%Y-%m-%d").date()).days // 7 if previous else None
+        previous_accounts = {account["account_id"]: account for account in previous["accounts"]} if previous else {}
+        current_accounts = {account["account_id"]: account for account in row["accounts"]}
+        account_changes = []
+        for account_id in current_accounts.keys() | previous_accounts.keys():
+            account = current_accounts.get(account_id) or previous_accounts[account_id]
+            income = current_accounts.get(account_id, {}).get("annual_income", 0)
+            prior = previous_accounts.get(account_id, {}).get("annual_income", 0)
+            account_changes.append({**account, "annual_income": income, "previous_annual_income": prior if previous else None,
+                                    "change": income - prior if previous else None})
+        row["account_changes"] = sorted(account_changes, key=lambda account: account["account_name"])
+        previous = row
+    return {"weeks": list(reversed(ordered)), "current": current,
+            "first_saved_date": snapshots[0]["market_date"] if snapshots else None,
+            "currency": "CAD", "as_of": today_date.isoformat()}
 
 
 def latest_batch_filter_sql():
