@@ -1520,6 +1520,45 @@ tr:hover td {
   border-top: 1px solid var(--line);
 }
 
+.performance-accounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.performance-accounts legend {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.performance-accounts label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.performance-accounts input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.portfolio-performance .performance-summary {
+  flex-wrap: wrap;
+}
+
+.portfolio-performance .performance-summary strong {
+  white-space: normal;
+}
+
 .performance-summary {
   display: flex;
   align-items: center;

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import wbfcLogoUrl from "./assets/wbfc-logo.png";
+import { buildPortfolioPerformanceSeries, isRetirementAccount } from "./performance.js";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -416,6 +417,9 @@ function App() {
   const [fundamentalsLoading, setFundamentalsLoading] = useState(false);
   const [fundamentalsError, setFundamentalsError] = useState("");
   const [historyData, setHistoryData] = useState(null);
+  const [historyError, setHistoryError] = useState("");
+  const [excludedPerformanceAccounts, setExcludedPerformanceAccounts] = useState([]);
+  const [excludedRetirementAccounts, setExcludedRetirementAccounts] = useState([]);
   const [usersData, setUsersData] = useState(null);
   const [transactionsData, setTransactionsData] = useState(null);
   const [privateFundData, setPrivateFundData] = useState({});
@@ -527,9 +531,15 @@ function App() {
   }
 
   async function loadHistory() {
-    const response = await apiFetch("/api/balance-snapshots?limit=5000");
-    const payload = await parseApiResponse(response);
-    setHistoryData(payload);
+    setHistoryError("");
+    try {
+      const response = await apiFetch("/api/balance-snapshots?limit=5000");
+      const payload = await parseApiResponse(response);
+      setHistoryData(payload);
+    } catch (error) {
+      setHistoryError(error.message);
+      throw error;
+    }
   }
 
   async function loadUsers() {
@@ -554,6 +564,16 @@ function App() {
   useEffect(() => {
     checkSession();
   }, []);
+
+  useEffect(() => {
+    if (auth.status === "authenticated" && ["summary", "retirement"].includes(activeView)) {
+      loadHistory().catch((error) => {
+        if (error instanceof AuthError) {
+          setAuth({ status: "anonymous", username: null, isAdmin: false });
+        }
+      });
+    }
+  }, [auth.status, activeView]);
 
   useEffect(() => {
     if (auth.status !== "authenticated") {
@@ -626,6 +646,9 @@ function App() {
     setData(null);
     setFundamentalsData(null);
     setHistoryData(null);
+    setHistoryError("");
+    setExcludedPerformanceAccounts([]);
+    setExcludedRetirementAccounts([]);
     setUsersData(null);
     setTransactionsData(null);
     setAuth({ status: "anonymous", username: null, isAdmin: false });
@@ -1262,7 +1285,21 @@ function App() {
           {activeView === "summary" && (
             <SummaryPage
               data={data}
+              history={historyData}
+              historyError={historyError}
+              excludedAccounts={excludedPerformanceAccounts}
+              onExcludedAccountsChange={setExcludedPerformanceAccounts}
               onActivate={activateView}
+            />
+          )}
+
+          {activeView === "retirement" && (
+            <RetirementPage
+              data={data}
+              history={historyData}
+              historyError={historyError}
+              excludedAccounts={excludedRetirementAccounts}
+              onExcludedAccountsChange={setExcludedRetirementAccounts}
             />
           )}
 
@@ -1536,12 +1573,15 @@ function HoldingsImportPage({ accounts, fileLabel, onFileChange, onSubmit }) {
 }
 
 function PrimaryTabs({ activeView, onActivate }) {
-  const portfolioActive = activeView !== "fundamentals";
+  const portfolioActive = !["retirement", "fundamentals"].includes(activeView);
 
   return (
     <div className="tabs primary-tabs" role="tablist" aria-label="Investment sections">
       <button className={`tab ${portfolioActive ? "active" : ""}`} type="button" onClick={() => onActivate("summary")}>
         Portfolio
+      </button>
+      <button className={`tab ${activeView === "retirement" ? "active" : ""}`} type="button" onClick={() => onActivate("retirement")}>
+        Retirement
       </button>
       <button className={`tab ${activeView === "fundamentals" ? "active" : ""}`} type="button" onClick={() => onActivate("fundamentals")}>
         Fundamentals
@@ -1786,7 +1826,7 @@ function CashBalanceModal({ account, onSubmit, onClose }) {
   );
 }
 
-function SummaryPage({ data, onActivate }) {
+function SummaryPage({ data, history, historyError, excludedAccounts, onExcludedAccountsChange, onActivate }) {
   const incomeByAccount = incomeByAccountFromHoldings(data.holdings);
 
   return (
@@ -1797,8 +1837,87 @@ function SummaryPage({ data, onActivate }) {
         </div>
         <AccountSummaryTable accounts={data.accounts} incomeByAccount={incomeByAccount} onActivate={onActivate} />
       </section>
+      <PortfolioPerformancePanel
+        accounts={data.all_accounts || data.accounts || []}
+        history={history}
+        historyError={historyError}
+        excludedAccounts={excludedAccounts}
+        onExcludedAccountsChange={onExcludedAccountsChange}
+      />
       <PriceUpdateFooter status={data.price_refresh} />
     </section>
+  );
+}
+
+function RetirementPage({ data, history, historyError, excludedAccounts, onExcludedAccountsChange }) {
+  const accounts = (data.all_accounts || data.accounts || []).filter(isRetirementAccount);
+  return (
+    <section className="view active">
+      <PortfolioPerformancePanel
+        accounts={accounts}
+        history={history}
+        historyError={historyError}
+        excludedAccounts={excludedAccounts}
+        onExcludedAccountsChange={onExcludedAccountsChange}
+        title="Retirement Performance History"
+        ariaLabel="Retirement performance history chart"
+      />
+      <PriceUpdateFooter status={data.price_refresh} />
+    </section>
+  );
+}
+
+function PortfolioPerformancePanel({
+  accounts, history, historyError, excludedAccounts, onExcludedAccountsChange,
+  title = "Performance History", ariaLabel = "Portfolio performance history chart",
+}) {
+  const orderedAccounts = sortAccountsForDisplay(accounts);
+  const selectedAccounts = orderedAccounts.filter((account) => !excludedAccounts.includes(String(account.id)));
+  const performanceSeries = useMemo(
+    () => buildPortfolioPerformanceSeries(
+      history?.snapshots || [],
+      accounts.filter((account) => !excludedAccounts.includes(String(account.id))).map((account) => account.id),
+    ),
+    [history, accounts, excludedAccounts],
+  );
+  return (
+      <section className="section-panel portfolio-performance">
+        <div className="panel-heading">
+          <h2>{title}</h2>
+          <span>{selectedAccounts.length} of {accounts.length} accounts</span>
+        </div>
+        <fieldset className="performance-accounts">
+          <legend>Accounts included in total</legend>
+          {orderedAccounts.map((account) => (
+            <label key={account.id}>
+              <input
+                type="checkbox"
+                checked={!excludedAccounts.includes(String(account.id))}
+                onChange={(event) => {
+                  const id = String(account.id);
+                  const checked = event.target.checked;
+                  onExcludedAccountsChange((current) => checked
+                    ? current.filter((item) => item !== id)
+                    : [...current, id]);
+                }}
+              />
+              <span>{account.name}</span>
+            </label>
+          ))}
+        </fieldset>
+        <p className="row-sub">Totals use available saved account balances in CAD.</p>
+        {!accounts.length ? (
+          <div className="empty-state">No accounts available.</div>
+        ) : !selectedAccounts.length ? (
+          <div className="empty-state">Select at least one account to view performance.</div>
+        ) : historyError ? (
+          <div className="empty-state" role="alert">Unable to load history: {historyError}</div>
+        ) : !history ? (
+          <div className="empty-state">Loading history...</div>
+        ) : (
+          <AccountPerformanceChart series={performanceSeries} ariaLabel={ariaLabel} />
+        )}
+      </section>
   );
 }
 
@@ -2217,7 +2336,7 @@ function PerformanceRangeControls({ selectedRange, onChange }) {
   );
 }
 
-function AccountPerformanceChart({ series, loading }) {
+function AccountPerformanceChart({ series, loading, ariaLabel = "Account performance history chart" }) {
   const [selectedRange, setSelectedRange] = useState("max");
   const [hoveredIndex, setHoveredIndex] = useState(null);
 
@@ -2310,7 +2429,7 @@ function AccountPerformanceChart({ series, loading }) {
         className="performance-chart"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
-        aria-label="Account performance history chart"
+        aria-label={ariaLabel}
         onMouseMove={handleChartMove}
         onMouseLeave={() => setHoveredIndex(null)}
       >
