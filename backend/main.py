@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from backend import real_estate
 
 from server import (
     BASE_DIR,
@@ -98,6 +99,10 @@ app.add_middleware(
 class CashBalancePayload(BaseModel):
     currency: str = "CAD"
     amount: float = 0
+
+
+class RentalCondoPayload(BaseModel):
+    mls: str
 
 
 class AccountPayload(BaseModel):
@@ -361,6 +366,7 @@ def price_refresh_loop():
 def start_background_workers():
     global price_refresh_thread
     ensure_auth_user(AUTH_USERNAME, AUTH_PASSWORD, is_admin=True)
+    real_estate.clear_saved_listings()
     if not PRICE_REFRESH_ENABLED or price_refresh_thread:
         return
     price_refresh_stop.clear()
@@ -620,6 +626,19 @@ def stock_detail(symbol: str, market: str = "", refresh: bool = False, username:
 @app.get("/api/fundamentals")
 def fundamentals(refresh: bool = False, username: str = Depends(require_auth)):
     return get_fundamentals(refresh)
+
+
+@app.post("/api/real-estate/condos")
+def lookup_rental_condo(payload: RentalCondoPayload, response: Response, username: str = Depends(require_auth)):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"listing": real_estate.fetch_listing(payload.mls)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except real_estate.ListingNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except real_estate.ListingUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/fundamentals/watchlist")

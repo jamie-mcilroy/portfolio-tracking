@@ -1,10 +1,14 @@
-export function isRetirementAccount(account) {
+export function isRspAccount(account) {
   const name = String(account.name || "")
     .replace(/^\d+\s+/, "")
     .replace(/\s+-\s+Combined Holdings$/i, "")
     .trim()
     .toLowerCase();
-  return ["jamie rrsp", "michelle rrsp", "michelle rsp"].includes(name)
+  return ["jamie rrsp", "jamie rsp", "michelle rrsp", "michelle rsp"].includes(name);
+}
+
+export function isRetirementAccount(account) {
+  return isRspAccount(account)
     || String(account.account_entity || "").trim().toLowerCase() === "corporate";
 }
 

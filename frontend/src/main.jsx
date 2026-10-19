@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import wbfcLogoUrl from "./assets/wbfc-logo.png";
-import { buildPortfolioPerformanceSeries, isRetirementAccount } from "./performance.js";
+import { buildPortfolioPerformanceSeries } from "./performance.js";
+import RetirementHoldingsTable from "./RetirementHoldingsTable.jsx";
+import RealEstatePage from "./RealEstatePage.jsx";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -419,7 +421,6 @@ function App() {
   const [historyData, setHistoryData] = useState(null);
   const [historyError, setHistoryError] = useState("");
   const [excludedPerformanceAccounts, setExcludedPerformanceAccounts] = useState([]);
-  const [excludedRetirementAccounts, setExcludedRetirementAccounts] = useState([]);
   const [usersData, setUsersData] = useState(null);
   const [transactionsData, setTransactionsData] = useState(null);
   const [privateFundData, setPrivateFundData] = useState({});
@@ -566,7 +567,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (auth.status === "authenticated" && ["summary", "retirement"].includes(activeView)) {
+    if (auth.status === "authenticated" && activeView === "summary") {
       loadHistory().catch((error) => {
         if (error instanceof AuthError) {
           setAuth({ status: "anonymous", username: null, isAdmin: false });
@@ -648,7 +649,6 @@ function App() {
     setHistoryData(null);
     setHistoryError("");
     setExcludedPerformanceAccounts([]);
-    setExcludedRetirementAccounts([]);
     setUsersData(null);
     setTransactionsData(null);
     setAuth({ status: "anonymous", username: null, isAdmin: false });
@@ -1293,15 +1293,10 @@ function App() {
             />
           )}
 
-          {activeView === "retirement" && (
-            <RetirementPage
-              data={data}
-              history={historyData}
-              historyError={historyError}
-              excludedAccounts={excludedRetirementAccounts}
-              onExcludedAccountsChange={setExcludedRetirementAccounts}
-            />
-          )}
+          {activeView === "retirement" && <RetirementPage data={data} />}
+
+          {activeView === "real-estate" && <RealEstatePage request={apiFetch} parseResponse={parseApiResponse}
+            onAuthError={() => setAuth({ status: "anonymous", username: null, isAdmin: false })} />}
 
           {activeView === "fundamentals" && (
             <FundamentalsPage
@@ -1573,7 +1568,7 @@ function HoldingsImportPage({ accounts, fileLabel, onFileChange, onSubmit }) {
 }
 
 function PrimaryTabs({ activeView, onActivate }) {
-  const portfolioActive = !["retirement", "fundamentals"].includes(activeView);
+  const portfolioActive = !["retirement", "fundamentals", "real-estate"].includes(activeView);
 
   return (
     <div className="tabs primary-tabs" role="tablist" aria-label="Investment sections">
@@ -1582,6 +1577,9 @@ function PrimaryTabs({ activeView, onActivate }) {
       </button>
       <button className={`tab ${activeView === "retirement" ? "active" : ""}`} type="button" onClick={() => onActivate("retirement")}>
         Retirement
+      </button>
+      <button className={`tab ${activeView === "real-estate" ? "active" : ""}`} type="button" onClick={() => onActivate("real-estate")}>
+        Real Estate
       </button>
       <button className={`tab ${activeView === "fundamentals" ? "active" : ""}`} type="button" onClick={() => onActivate("fundamentals")}>
         Fundamentals
@@ -1826,6 +1824,22 @@ function CashBalanceModal({ account, onSubmit, onClose }) {
   );
 }
 
+function RetirementPage({ data }) {
+  return (
+    <section className="view active" aria-label="Retirement">
+      <div className="tabs" role="tablist" aria-label="Retirement sections">
+        <button className="tab active" type="button" role="tab" id="dividend-growth-tab"
+          aria-selected="true" aria-controls="dividend-growth-panel">
+          Dividend Growth
+        </button>
+      </div>
+      <div role="tabpanel" id="dividend-growth-panel" aria-labelledby="dividend-growth-tab">
+        <RetirementHoldingsTable data={data} />
+      </div>
+    </section>
+  );
+}
+
 function SummaryPage({ data, history, historyError, excludedAccounts, onExcludedAccountsChange, onActivate }) {
   const incomeByAccount = incomeByAccountFromHoldings(data.holdings);
 
@@ -1843,24 +1857,6 @@ function SummaryPage({ data, history, historyError, excludedAccounts, onExcluded
         historyError={historyError}
         excludedAccounts={excludedAccounts}
         onExcludedAccountsChange={onExcludedAccountsChange}
-      />
-      <PriceUpdateFooter status={data.price_refresh} />
-    </section>
-  );
-}
-
-function RetirementPage({ data, history, historyError, excludedAccounts, onExcludedAccountsChange }) {
-  const accounts = (data.all_accounts || data.accounts || []).filter(isRetirementAccount);
-  return (
-    <section className="view active">
-      <PortfolioPerformancePanel
-        accounts={accounts}
-        history={history}
-        historyError={historyError}
-        excludedAccounts={excludedAccounts}
-        onExcludedAccountsChange={onExcludedAccountsChange}
-        title="Retirement Performance History"
-        ariaLabel="Retirement performance history chart"
       />
       <PriceUpdateFooter status={data.price_refresh} />
     </section>

@@ -60,3 +60,16 @@ test("keeps zero and negative balances; skips unavailable balances and invalid d
   assert.deepEqual(series.map((point) => point.value), [0, -10]);
   assert.deepEqual(buildPortfolioPerformanceSeries(snapshots, [3]), []);
 });
+
+test('RSP exercise includes only Jamie and Michelle RSP accounts', async () => {
+  const { isRspAccount } = await import('./performance.js');
+  const accounts = [
+    { name: 'Jamie RRSP' }, { name: 'Michelle RSP' },
+    { name: "WB Investor's Edge", account_entity: 'Corporate' },
+    { name: 'ATNV Capital Account', account_entity: 'Corporate' },
+    { name: 'WB IBRK', account_entity: 'Corporate' },
+    { name: 'Jamie TFSA' }, { name: 'RESP' },
+  ];
+  assert.deepEqual(accounts.filter(isRspAccount).map((account) => account.name), ['Jamie RRSP', 'Michelle RSP']);
+  assert.equal(isRspAccount({ name: '123 Michelle RRSP - Combined Holdings' }), true);
+});

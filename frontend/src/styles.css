@@ -2234,3 +2234,108 @@ tr:hover td {
     grid-template-columns: 1fr;
   }
 }
+
+.retirement-holdings-inputs { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 14px; }
+.retirement-holdings-inputs label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+.retirement-holdings-inputs input { width: 180px; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; }
+.retirement-holdings-scroll { margin-top: 16px; }
+.retirement-income-table { table-layout: fixed; min-width: 0; font-size: 12px; }
+.retirement-year-cell strong, .retirement-year-cell span { display: block; }
+.retirement-year-cell strong { font-weight: 600; }
+.retirement-year-cell span { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.retirement-income-table caption { text-align: left; white-space: normal; padding-bottom: 10px; color: var(--muted); }
+.retirement-income-table th, .retirement-income-table td { min-width: 0; padding: 5px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.retirement-income-table thead th { white-space: nowrap; }
+.retirement-income-table thead tr:first-child th { text-align: right; background: #edf3f8; }
+.retirement-income-table .retirement-holding-name { position: sticky; left: 0; z-index: 1; background: var(--surface); white-space: nowrap; text-align: left; box-shadow: 1px 0 0 var(--line); }
+.retirement-income-table thead .retirement-holding-name { text-align: left; }
+.retirement-holding-name span { display: block; color: var(--muted); font-size: 11px; font-weight: 400; margin-top: 3px; }
+.retirement-income-table .retirement-year-start, .retirement-income-table .retirement-year-heading { border-left: 2px solid var(--line); }
+.retirement-income-table .retirement-forecast-note { color: #8b5d18; }
+.retirement-account-total td, .retirement-account-total th { font-weight: 700; background: #f4f7f9; }
+.retirement-income-table .retirement-account-total .retirement-holding-name { background: #f4f7f9; }
+.retirement-income-table tfoot td, .retirement-income-table tfoot th { font-weight: 800; background: #e9f2ec; border-top: 2px solid var(--line); }
+.retirement-income-table tfoot .retirement-holding-name { background: #e9f2ec; }
+.retirement-holdings-method { margin-top: 18px; color: var(--muted); font-size: 12px; }
+.retirement-holdings-method summary { cursor: pointer; font-size: 13px; }
+.retirement-holdings-method p { margin-top: 10px; max-width: 1100px; line-height: 1.6; }
+
+.rental-condo-lookup { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.rental-condo-lookup label { font-weight: 600; }
+.rental-condo-lookup input { width: 160px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; }
+.rental-condo-lookup button, .rental-condo-actions button { border: 1px solid var(--line); border-radius: 5px; background: var(--surface); padding: 8px 12px; cursor: pointer; }
+.rental-condo-lookup button { background: var(--blue); border-color: var(--blue); color: white; }
+.rental-condo-panel button:disabled { opacity: .55; cursor: default; }
+ .rental-condo-source { margin-top: 18px; }
+.rental-condo-lookup .rental-clear { background: var(--surface); color: var(--text); }
+.rental-model { margin-top: 22px; }
+.rental-property { display: grid; grid-template-columns: minmax(200px, 340px) 1fr; gap: 24px; align-items: center; }
+.rental-photo { width: 100%; height: 230px; object-fit: cover; border-radius: 8px; background: #eef2f5; }
+.rental-photo-empty { display: grid; place-items: center; color: var(--muted); }
+.rental-property h3 { margin: 10px 0 16px; font-size: 20px; }
+.rental-property-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; }
+.rental-property-facts dt { color: var(--muted); font-size: 12px; }
+.rental-property-facts dd { margin: 4px 0 0; font-size: 17px; font-weight: 600; }
+.rental-verdict { margin-top: 24px; padding: 20px 24px; border-radius: 8px; background: #f1f5f8; border: 1px solid var(--line); }
+.rental-verdict-positive, .rental-verdict-neutral { background: #edf7f1; border-color: #b9dac7; }
+.rental-verdict-negative { background: #fff3ec; border-color: #e4c2ae; }
+.rental-verdict > span { display: block; color: var(--muted); font-size: 13px; }
+.rental-verdict > strong { display: block; font-size: clamp(23px, 3vw, 34px); margin: 6px 0; }
+.rental-verdict-positive > strong { color: var(--green); }
+.rental-verdict-negative > strong { color: var(--red); }
+.rental-result-metrics { margin: 16px 0 24px; }
+.rental-result-metrics .row-sub { margin-top: 7px; }
+.rental-model-columns { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(280px, 1fr); gap: 28px; align-items: start; }
+.rental-input-group { border: 1px solid var(--line); border-radius: 7px; padding: 14px 16px 18px; margin: 0 0 18px; min-width: 0; }
+.rental-input-group legend { padding: 0 6px; font-weight: 700; }
+.rental-input-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 16px; }
+.rental-input-grid label { display: grid; align-content: end; gap: 6px; font-size: 12px; color: var(--muted); }
+.rental-input-grid input { width: 100%; min-width: 0; padding: 8px 10px; color: var(--text); border: 1px solid var(--line); border-radius: 5px; }
+.rental-breakdown { padding: 18px; background: #f6f8f9; border: 1px solid var(--line); border-radius: 7px; }
+.rental-breakdown h3 { margin: 0 0 14px; font-size: 16px; }
+.rental-breakdown dl { margin: 0; }
+.rental-breakdown dl > div { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.rental-breakdown dt { color: var(--muted); font-size: 12px; }
+.rental-breakdown dd { margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rental-breakdown .rental-breakdown-total { font-weight: 700; border: 0; }
+.rental-breakdown-total dt { color: var(--text); }
+.rental-reset { border: 1px solid var(--line); border-radius: 5px; padding: 7px 10px; background: var(--surface); cursor: pointer; }
+.rental-assumptions { margin: 20px 0 12px; }
+.rental-method { font-size: 12px; color: var(--muted); }
+.rental-method summary { cursor: pointer; }
+.rental-method p { margin: 10px 0; line-height: 1.6; max-width: 1000px; }
+@media (max-width: 800px) {
+  .rental-model-columns { grid-template-columns: 1fr; }
+  .rental-property { grid-template-columns: minmax(160px, 260px) 1fr; gap: 16px; }
+}
+@media (max-width: 520px) {
+  .rental-property, .rental-input-grid { grid-template-columns: 1fr; }
+}
+
+.rental-back { border: 1px solid var(--line); border-radius: 5px; background: var(--surface); padding: 8px 12px; cursor: pointer; color: var(--blue); }
+.rental-comparison-sheet-wrap { margin-top: 20px; max-height: 75vh; overflow: auto; border: 1px solid var(--line); }
+.rental-comparison-sheet { table-layout: fixed; min-width: 0; font-size: 12px; }
+.rental-comparison-sheet caption { text-align: left; padding: 10px; color: var(--muted); font-size: 12px; }
+.rental-sheet-label-col { width: 230px; }
+.rental-sheet-property-col { width: 240px; }
+.rental-comparison-sheet th, .rental-comparison-sheet td { padding: 0; border: 1px solid var(--line); }
+.rental-comparison-sheet thead th { position: sticky; top: 0; z-index: 3; background: #eaf1f7; min-width: 230px; }
+.rental-comparison-sheet thead th:first-child { left: 0; z-index: 4; padding: 10px 12px; }
+.rental-comparison-sheet thead button { width: 100%; background: transparent; border: 0; color: var(--blue); text-align: center; padding: 10px 12px; font-weight: 700; cursor: pointer; }
+.rental-comparison-sheet thead button span { display: block; font-size: 10px; font-weight: 400; margin-top: 3px; }
+.rental-comparison-sheet tbody th[scope="row"], .rental-comparison-sheet tfoot th { position: sticky; left: 0; top: auto; z-index: 1; background: #f8fafb; padding: 8px 12px; min-width: 230px; font-weight: 500; }
+.rental-comparison-sheet .rental-sheet-group th { position: static; padding: 8px 12px; background: #eaf1f7; font-weight: 700; border-top: 2px solid #c9d5df; }
+.rental-comparison-sheet td { text-align: right; min-width: 240px; max-width: 280px; font-variant-numeric: tabular-nums; }
+.rental-sheet-cell { display: block; width: 100%; height: 100%; padding: 8px 12px; background: transparent; border: 0; color: inherit; text-align: inherit; font: inherit; cursor: pointer; }
+.rental-sheet-cell:hover { background: #edf4fb; }
+.rental-sheet-cell:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.rental-comparison-sheet .rental-sheet-text { text-align: left; white-space: normal; }
+.rental-sheet-photo .rental-sheet-cell { padding: 8px; }
+.rental-sheet-photo .rental-photo { width: 224px; height: 130px; display: block; }
+.rental-sheet-actions { display: flex; gap: 8px; justify-content: center; padding: 10px; }
+.rental-sheet-actions button { border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; background: var(--surface); color: var(--blue); cursor: pointer; font-size: 12px; }
+.rental-comparison-sheet .rental-sheet-editable { background: #f0f6fd; }
+.rental-sheet-input { display: block; width: 100%; min-width: 0; padding: 8px 12px; border: 1px solid transparent; background: transparent; color: var(--text); text-align: right; font: inherit; font-variant-numeric: tabular-nums; }
+.rental-sheet-input:hover { border-color: #abc4df; }
+.rental-sheet-input:focus { outline: 2px solid var(--blue); outline-offset: -2px; background: white; }
+.rental-sheet-input:invalid { border-color: var(--red); }
