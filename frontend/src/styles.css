@@ -2339,3 +2339,10 @@ tr:hover td {
 .rental-sheet-input:hover { border-color: #abc4df; }
 .rental-sheet-input:focus { outline: 2px solid var(--blue); outline-offset: -2px; background: white; }
 .rental-sheet-input:invalid { border-color: var(--red); }
+
+.rental-fee-inclusions { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+.rental-fee-inclusions h4 { margin: 0 0 8px; font-size: 13px; }
+.rental-fee-inclusions > p { font-size: 12px; color: var(--muted); }
+.rental-fee-inclusions dl { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 12px 0; }
+.rental-fee-inclusions dt { font-size: 11px; color: var(--muted); }
+.rental-fee-inclusions dd { margin: 4px 0 0; font-size: 13px; font-weight: 600; }

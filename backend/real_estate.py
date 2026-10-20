@@ -53,6 +53,27 @@ def _number(value):
     return result if math.isfinite(result) and result >= 0 else None
 
 
+def fee_inclusion_status(items):
+    """Use fee inclusions only, never the property's heating system or amenities."""
+    patterns = {"electricity": r"\b(?:electricity|electric|electrical|hydro|power)\b",
+                "heat": r"\b(?:heat|heating)\b", "parking": r"\bparking\b"}
+    evidence = {key: set() for key in patterns}
+    for item in items:
+        text = item.lower()
+        if re.search(r"\bnot (?:specified|listed|confirmed|known)\b", text):
+            continue
+        excluded = bool(re.search(r"\b(?:not included|not covered|excluded|extra charge|paid separately|separately metered|tenant.paid|owner.paid)\b|^\s*(?:no|not)\s", text))
+        for key, pattern in patterns.items():
+            if not re.search(pattern, text):
+                continue
+            if key == "parking" and re.search(r"\b(?:visitor|guest)\b", text):
+                continue
+            if re.search(r"\b(?:common areas?|shared areas?)\b", text) or (key == "parking" and re.search(r"\bmaintenance\b", text)):
+                continue
+            evidence[key].add(not excluded)
+    return {key: next(iter(values)) if len(values) == 1 else None for key, values in evidence.items()}
+
+
 def parse_listing(content, mls, source_url):
     mls = normalize_mls(mls)
     if not _provider_url(source_url):
@@ -105,6 +126,29 @@ def parse_listing(content, mls, source_url):
         raise ListingUnavailable("The listing provider did not return a valid asking price.")
     taxes_text = field("Property Taxes")
     tax_year = re.search(r"\((20\d{2})\)", taxes_text or "")
+    size = residence.get("floorSize") or {}
+    square_feet = None
+    if isinstance(size, dict):
+        area = _number(size.get("value"))
+        unit = str(size.get("unitCode") or size.get("unitText") or "").lower()
+        if area is not None and area > 0:
+            if unit in {"ftk", "ft2", "ft²", "sqft", "sq ft"} or "square feet" in unit or "square foot" in unit:
+                square_feet = area
+            elif unit in {"mtk", "m2", "m²", "sqm", "sq m"} or "square met" in unit:
+                square_feet = area / 0.09290304
+    if square_feet is None:
+        for label in ["Above-Grade Sq Ft", "Living Area Sq Ft", "Square Footage", "Sq ft"]:
+            text = field(label)
+            square_feet = _number(text)
+            if square_feet is not None and re.search(r"\bm2\b|m²|\bsq\.?\s*m\b|square met", text or "", re.I):
+                square_feet /= 0.09290304
+            if square_feet is not None:
+                break
+    if square_feet is not None and square_feet <= 0:
+        square_feet = None
+    fee_text = next((value for label in ["Fee Includes", "Association Fee Includes", "Condo Fee Includes"] if (value := field(label))), "")
+    fee_includes = [part.strip() for part in re.split(r"[·,;\n]+", fee_text) if part.strip() and part.strip().lower() not in {"n/a", "none", "not available", "not listed"}]
+    condo_fee = _number(field("Monthly Condo Fee"))
     images = residence.get("image") or listing.get("image") or []
     if not isinstance(images, list):
         images = [images]
@@ -115,7 +159,10 @@ def parse_listing(content, mls, source_url):
             photo_url = url
             break
     return {"mls": mls, "address": address_text or residence.get("name") or listing.get("name", ""),
-            "price": price, "condo_fee_monthly": _number(field("Monthly Condo Fee")),
+            "price": price, "condo_fee_monthly": condo_fee,
+            "square_feet": square_feet,
+            "condo_fee_per_sqft_monthly": condo_fee / square_feet if condo_fee is not None and square_feet else None,
+            "condo_fee_includes": fee_includes, "condo_fee_inclusions": fee_inclusion_status(fee_includes),
             "property_tax_annual": _number(taxes_text), "tax_year": int(tax_year.group(1)) if tax_year else None,
             "bedrooms": _number(residence.get("numberOfBedrooms") if residence.get("numberOfBedrooms") is not None else field("Bedrooms")),
             "bathrooms": _number(residence.get("numberOfBathroomsTotal") if residence.get("numberOfBathroomsTotal") is not None else field("Total Bathrooms")),

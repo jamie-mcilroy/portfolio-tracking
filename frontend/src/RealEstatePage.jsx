@@ -1,9 +1,17 @@
 import React, { useState } from "react";
-import { modelRental } from "./rentalCashFlow.js";
+import { modelRental, monthlyCondoFeePerSquareFoot } from "./rentalCashFlow.js";
 
 const cad = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 });
 const preciseCad = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (value) => value == null ? 'Not listed' : cad.format(value);
+const areaFormat = new Intl.NumberFormat('en-CA', { maximumFractionDigits: 2 });
+const areaLabel = (listing) => listing.square_feet > 0 ? `${areaFormat.format(listing.square_feet)} sq ft` : 'Not listed';
+const feePerFootLabel = (listing, values) => {
+  const value = monthlyCondoFeePerSquareFoot(values.condoFee, listing.square_feet);
+  return value === null ? 'Not available' : `${preciseCad.format(value)} / sq ft / mo`;
+};
+const inclusionLabel = (listing, key) => listing.condo_fee_inclusions?.[key] === true ? 'Included'
+  : listing.condo_fee_inclusions?.[key] === false ? 'Not included' : 'Not listed';
 function initial(listing) {
   const values = { price: listing.price ?? '', rent: '', downPaymentPct: 20, interestRate: 5,
     amortizationYears: 25, condoFee: listing.condo_fee_monthly ?? '', annualTax: listing.property_tax_annual ?? '',
@@ -108,9 +116,17 @@ export function RentalComparisonList({ comparisons, onOpen, onRemove, onEdit }) 
       ['Asking price', (item) => money(item.listing.price)],
       ['Modelled purchase price', (item) => dollars(item.values.price)],
       ['Condo fee / month', (item) => dollars(item.values.condoFee)],
+      ['Floor area', (item) => areaLabel(item.listing)],
+      ['Condo fee / sq ft / month', (item) => feePerFootLabel(item.listing, item.values)],
       ['Property taxes / year', (item) => dollars(item.values.annualTax)],
       ['Bedrooms', (item) => item.listing.bedrooms ?? 'Not listed'],
       ['Bathrooms', (item) => item.listing.bathrooms ?? 'Not listed'],
+    ]],
+    ['Condo fee inclusions', [
+      ['Electricity / power', (item) => inclusionLabel(item.listing, 'electricity')],
+      ['Heat', (item) => inclusionLabel(item.listing, 'heat')],
+      ['Parking', (item) => inclusionLabel(item.listing, 'parking')],
+      ['Full fee inclusions', (item) => item.listing.condo_fee_includes?.join(' · ') || 'Not listed', 'inclusions'],
     ]],
     ['Rent & financing', [
       ['Expected rent / month', (item) => item.hasRent ? dollars(item.values.rent) : 'Enter rent'],
@@ -155,7 +171,7 @@ export function RentalComparisonList({ comparisons, onOpen, onRemove, onEdit }) 
             const editable = editableRows[label];
             const value = item.result?.[kind];
             const tone = value != null && item.hasRent ? value < -.005 ? 'negative' : value > .005 ? 'positive' : '' : '';
-            return <td key={item.listing.mls} className={`${editable ? 'rental-sheet-editable' : ''} ${kind === 'photo' ? 'rental-sheet-photo' : ''} ${kind === 'address' || kind === 'verdict' ? 'rental-sheet-text' : ''} ${tone}`}>
+            return <td key={item.listing.mls} className={`${editable ? 'rental-sheet-editable' : ''} ${kind === 'photo' ? 'rental-sheet-photo' : ''} ${['address', 'verdict', 'inclusions'].includes(kind) ? 'rental-sheet-text' : ''} ${tone}`}>
               {editable ? <input className="rental-sheet-input" type="number" min={editable.min ?? 0}
                 max={editable.max} step={editable.step ?? 'any'} placeholder={editable.placeholder}
                 value={item.values[editable.key]} aria-label={`${label} for ${item.listing.mls}`}
@@ -203,9 +219,16 @@ export function RentalModel({ listing, values, onValuesChange }) {
         <dl className="rental-property-facts">
           <div><dt>Asking price</dt><dd>{money(listing.price)}</dd></div>
           <div><dt>Condo fee / month</dt><dd>{money(listing.condo_fee_monthly)}</dd></div>
+          <div><dt>Floor area</dt><dd>{areaLabel(listing)}</dd></div>
+          <div><dt>Modelled condo fee per square foot</dt><dd>{feePerFootLabel(listing, values)}</dd></div>
           <div><dt>Property taxes / year{listing.tax_year ? ` (${listing.tax_year})` : ''}</dt><dd>{money(listing.property_tax_annual)}</dd></div>
           <div><dt>Bedrooms / bathrooms</dt><dd>{listing.bedrooms ?? 'Not listed'} / {listing.bathrooms ?? 'Not listed'}</dd></div>
         </dl>
+        <div className="rental-fee-inclusions"><h4>Condo fee includes</h4>
+          <p>{listing.condo_fee_includes?.join(' · ') || 'Not listed'}</p>
+          <dl>{[['electricity', 'Electricity / power'], ['heat', 'Heat'], ['parking', 'Parking']].map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{inclusionLabel(listing, key)}</dd></div>)}</dl>
+          <p className="row-sub">“Not listed” means unconfirmed. Parking availability and heating type do not confirm that their costs are covered by condo fees.</p>
+        </div>
       </div>
     </div>
     <div className={`rental-verdict rental-verdict-${status}`} aria-live="polite">
@@ -247,6 +270,7 @@ export function RentalModel({ listing, values, onValuesChange }) {
           {field('managementPct', 'Management fee (% collected rent)', { max: 99.9 })}
           {field('otherCosts', 'Other costs / reserves per month (CAD)')}
         </div></fieldset>
+        <p className="row-sub">Enter only utilities and parking costs not already covered by condo fees; use other costs for separate parking charges.</p>
         <button className="rental-reset" type="button" onClick={() => onValuesChange(initial(listing))}>Reset assumptions</button>
       </div>
       <div className="rental-breakdown"><h3>Where the rent goes each month</h3>

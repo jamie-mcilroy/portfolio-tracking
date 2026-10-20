@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { modelRental } from './rentalCashFlow.js';
+import { modelRental, monthlyCondoFeePerSquareFoot } from './rentalCashFlow.js';
 const input = { price: 270000, rent: 1800, downPaymentPct: 20, interestRate: 5, amortizationYears: 25,
   condoFee: 480, annualTax: 2061, insurance: 50, utilities: 0, maintenancePct: 5,
   managementPct: 0, vacancyPct: 5, otherCosts: 0, closingCosts: 0 };
@@ -67,4 +67,13 @@ test('cash returns handle zero down payment and all-cash purchase without dividi
   near(costsOnly.cashOnCashReturnPct, costsOnly.annualCashFlow / 4000 * 100);
   const cash = run({ downPaymentPct: 100 });
   near(cash.downPaymentReturnPct, cash.annualCashFlow / 270000 * 100);
+});
+
+
+test('monthly condo fee per square foot updates with the fee and handles unknown area', () => {
+  near(monthlyCondoFeePerSquareFoot(480, 600), .8);
+  near(monthlyCondoFeePerSquareFoot('600', 600), 1);
+  near(monthlyCondoFeePerSquareFoot(0, 600), 0);
+  for (const [fee, area] of [[null, 600], ['', 600], [480, null], [480, 0], [480, -1], [NaN, 600]])
+    assert.equal(monthlyCondoFeePerSquareFoot(fee, area), null);
 });

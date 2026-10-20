@@ -1,5 +1,11 @@
 // Fixed-rate Canadian mortgage: semi-annual compounding, monthly payments.
 // https://www.bmo.com/en-ca/popups/main/personal/mortgages/terms-and-conditions-en/
+export function monthlyCondoFeePerSquareFoot(fee, squareFeet) {
+  if (fee == null || fee === '' || squareFeet == null || squareFeet === '') return null;
+  const monthlyFee = Number(fee), area = Number(squareFeet);
+  return Number.isFinite(monthlyFee) && monthlyFee >= 0 && Number.isFinite(area) && area > 0 ? monthlyFee / area : null;
+}
+
 export function modelRental(input) {
   const keys = ['price', 'rent', 'downPaymentPct', 'interestRate', 'amortizationYears',
     'condoFee', 'annualTax', 'insurance', 'utilities', 'maintenancePct', 'managementPct',

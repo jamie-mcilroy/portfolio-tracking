@@ -10,15 +10,18 @@ from backend import main as api, real_estate as re
 
 URL = 'https://www.calgarylistings.com/calgary-mls/A2338340-example/'
 
-def fixture(fees=True, price=270000, currency='CAD', mls='A2338340'):
+def fixture(fees=True, price=270000, currency='CAD', mls='A2338340', square_feet=551.79, area_unit='FTK', includes='Heat · Water'):
     entities = {'@graph': [
         {'@type': 'RealEstateListing', 'url': f'https://www.calgarylistings.com/calgary-mls/{mls}-example/',
          'offers': {'price': price, 'priceCurrency': currency}, 'dateModified': '2026-10-18', 'mainEntity': {'@id': '#home'}},
         {'@type': 'Apartment', '@id': '#home', 'identifier': f'MLS {mls}',
+         'floorSize': {'value': square_feet, 'unitCode': area_unit},
          'numberOfBedrooms': 2, 'numberOfBathroomsTotal': 1.5, 'image': ['https://www.calgarylistings.com/photos/main.jpg'],
          'address': {'streetAddress': '903, 3830 Brentwood Road NW', 'addressLocality': 'Calgary', 'addressRegion': 'AB'}},
     ]}
     details = '<div><span>Monthly Condo Fee</span><span>$480/mo</span></div>' if fees else ''
+    if includes is not None:
+        details += f'<div><span>Fee Includes</span><span>{includes}</span></div>'
     return f'<html><script type="application/ld+json">{json.dumps(entities)}</script>{details}<div><div>Property Taxes</div><div>$2,061/yr <span>(2026)</span></div></div></html>'
 
 
@@ -28,6 +31,10 @@ class ListingParserTests(unittest.TestCase):
         self.assertEqual(result['mls'], 'A2338340')
         self.assertEqual(result['price'], 270000)
         self.assertEqual(result['condo_fee_monthly'], 480)
+        self.assertEqual(result['square_feet'], 551.79)
+        self.assertAlmostEqual(result['condo_fee_per_sqft_monthly'], 480 / 551.79)
+        self.assertEqual(result['condo_fee_includes'], ['Heat', 'Water'])
+        self.assertEqual(result['condo_fee_inclusions'], {'electricity': None, 'heat': True, 'parking': None})
         self.assertEqual(result['property_tax_annual'], 2061)
         self.assertEqual(result['tax_year'], 2026)
         self.assertEqual(result['bedrooms'], 2)
@@ -44,6 +51,32 @@ class ListingParserTests(unittest.TestCase):
         for url in ['javascript:alert(1)', 'http://127.0.0.1/photo.jpg']:
             page = fixture().replace('https://www.calgarylistings.com/photos/main.jpg', url)
             self.assertIsNone(re.parse_listing(page, 'A2338340', URL)['photo_url'])
+
+    def test_floor_area_units_fallback_and_missing_values(self):
+        metric = re.parse_listing(fixture(square_feet=56, area_unit='MTK'), 'A2338340', URL)
+        self.assertAlmostEqual(metric['square_feet'], 56 / 0.09290304)
+        fallback = fixture(square_feet=None).replace('</html>', '<div><span>Above-Grade Sq Ft</span><span>600 sq ft</span></div></html>')
+        self.assertEqual(re.parse_listing(fallback, 'A2338340', URL)['square_feet'], 600)
+        for square_feet in [None, 0]:
+            missing = re.parse_listing(fixture(square_feet=square_feet), 'A2338340', URL)
+            self.assertIsNone(missing['square_feet'])
+            self.assertIsNone(missing['condo_fee_per_sqft_monthly'])
+        self.assertIsNone(re.parse_listing(fixture(fees=False), 'A2338340', URL)['condo_fee_per_sqft_monthly'])
+
+    def test_explicit_fee_inclusions_and_exclusions(self):
+        result = re.parse_listing(fixture(includes='Heat; Electricity not included; Parking'), 'A2338340', URL)
+        self.assertEqual(result['condo_fee_inclusions'], {'electricity': False, 'heat': True, 'parking': True})
+        self.assertTrue(re.fee_inclusion_status(['Hydro'])['electricity'])
+        self.assertTrue(re.fee_inclusion_status(['Power'])['electricity'])
+        self.assertIsNone(re.fee_inclusion_status(['Heat', 'Heat not included', 'Heat'])['heat'])
+
+    def test_missing_inclusions_do_not_infer_coverage_from_amenities(self):
+        page = fixture(includes=None).replace('</html>', '<div><span>Heating</span><span>Electric</span></div><div><span>Building Amenities</span><span>Parking</span></div></html>')
+        result = re.parse_listing(page, 'A2338340', URL)
+        self.assertEqual(result['condo_fee_includes'], [])
+        self.assertEqual(result['condo_fee_inclusions'], {'electricity': None, 'heat': None, 'parking': None})
+        self.assertIsNone(re.fee_inclusion_status(['Visitor Parking'])['parking'])
+        self.assertIsNone(re.fee_inclusion_status(['Common Area Electricity'])['electricity'])
 
     def test_rejects_wrong_listing_unavailable_price_and_currency(self):
         with self.assertRaises(re.ListingNotFound):
