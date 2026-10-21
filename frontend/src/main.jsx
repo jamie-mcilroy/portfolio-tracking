@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import wbfcLogoUrl from "./assets/wbfc-logo.png";
 import { buildPortfolioPerformanceSeries } from "./performance.js";
 import RetirementHoldingsTable from "./RetirementHoldingsTable.jsx";
+import Drawdown from "./Drawdown.jsx";
 import RealEstatePage from "./RealEstatePage.jsx";
 import "./styles.css";
 
@@ -1825,16 +1826,20 @@ function CashBalanceModal({ account, onSubmit, onClose }) {
 }
 
 function RetirementPage({ data }) {
+  const [activeTab, setActiveTab] = useState('dividend-growth');
   return (
     <section className="view active" aria-label="Retirement">
       <div className="tabs" role="tablist" aria-label="Retirement sections">
-        <button className="tab active" type="button" role="tab" id="dividend-growth-tab"
-          aria-selected="true" aria-controls="dividend-growth-panel">
-          Dividend Growth
-        </button>
+        {[["dividend-growth", "Dividend Growth"], ["drawdown", "Drawdown"]].map(([id, label]) => (
+          <button key={id} className={`tab ${activeTab === id ? 'active' : ''}`} type="button" role="tab" id={`${id}-tab`}
+            aria-selected={activeTab === id} aria-controls={`${id}-panel`} onClick={() => setActiveTab(id)}>{label}</button>
+        ))}
       </div>
-      <div role="tabpanel" id="dividend-growth-panel" aria-labelledby="dividend-growth-tab">
+      <div role="tabpanel" id="dividend-growth-panel" aria-labelledby="dividend-growth-tab" hidden={activeTab !== 'dividend-growth'}>
         <RetirementHoldingsTable data={data} />
+      </div>
+      <div role="tabpanel" id="drawdown-panel" aria-labelledby="drawdown-tab" hidden={activeTab !== 'drawdown'}>
+        <Drawdown data={data} />
       </div>
     </section>
   );
