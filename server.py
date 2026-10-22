@@ -308,6 +308,18 @@ def init_db():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS net_worth_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                value REAL NOT NULL CHECK(value >= 0),
+                mortgage REAL NOT NULL DEFAULT 0 CHECK(mortgage >= 0),
+                valuation_date TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,

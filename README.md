@@ -63,6 +63,8 @@ Stop it:
 docker compose down
 ```
 
+The **Net Worth** tab combines all tracked investment account balances (including cash) with saved manual valuations for property, vehicles, art, jewellery and other assets. Each property stores its market value and outstanding mortgage, and displays equity as value minus mortgage. Total assets include the full property value; total debts include its mortgage once. Other debts are entered separately. Manual entries use CAD, include a valuation date and optional notes, and can be added, edited or deleted. They persist in SQLite and do not change retirement projections. Avoid adding assets or debts already included in the totals.
+
 ## Build Frontend
 
 ```bash
@@ -423,5 +425,7 @@ tar -czf "$HOME/portfolio-tracker-data-$(date +%Y%m%d).tgz" -C /opt portfolio-tr
 - Canadian tickers are requested from Yahoo Finance with `.TO` suffixes, while US tickers are converted to CAD with `CAD=X`.
 - After the market window closes, the background worker saves one account-balance snapshot per local market date when that day's price data is available.
 - Uploaded history maps CSV account labels to existing account names and writes them to the same balance snapshot tables used by end-of-day saves.
+
+- `Retirement` → `Die With Zero` takes retirement age, expected end-of-life age (both using Jamie’s birthday), and annual share-price growth. It solves for a fixed annual withdrawal before tax that exhausts the included West Bragg and Jamie/Michelle RSP balances at the selected age, without an earlier withdrawal shortfall. The tab shows annual income, an average monthly equivalent, a balance chart and annual income/balance details. It uses the same monthly model as Drawdown: dividends are additional to price growth, reinvested before retirement, with West Bragg drawn first; cash earns no growth. First and final calendar years are prorated. Income stays fixed in nominal CAD; the balance generally follows a curve. Taxes, inflation adjustments, CPP/OAS, mandatory withdrawals and new contributions are excluded. Zero is a modelled outcome under the chosen assumptions, not a guaranteed result.
 
 - SGOV uses separate editable share-price and dividend growth assumptions, both defaulting to 0%; historical payout growth is not extrapolated and the global share-price growth input does not apply to SGOV. Its current dividend per share is held flat by default, while DRIP increases shares and future income. The table’s dividend growth column shows the applied rate.

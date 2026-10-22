@@ -4,7 +4,9 @@ import wbfcLogoUrl from "./assets/wbfc-logo.png";
 import { buildPortfolioPerformanceSeries } from "./performance.js";
 import RetirementHoldingsTable from "./RetirementHoldingsTable.jsx";
 import Drawdown from "./Drawdown.jsx";
+import DieWithZero from "./DieWithZero.jsx";
 import RealEstatePage from "./RealEstatePage.jsx";
+import NetWorthPage from "./NetWorthPage.jsx";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -1296,6 +1298,9 @@ function App() {
 
           {activeView === "retirement" && <RetirementPage data={data} />}
 
+          {activeView === "net-worth" && <NetWorthPage data={data} request={apiFetch} parseResponse={parseApiResponse}
+            onAuthError={() => setAuth({ status: "anonymous", username: null, isAdmin: false })} />}
+
           {activeView === "real-estate" && <RealEstatePage request={apiFetch} parseResponse={parseApiResponse}
             onAuthError={() => setAuth({ status: "anonymous", username: null, isAdmin: false })} />}
 
@@ -1569,7 +1574,7 @@ function HoldingsImportPage({ accounts, fileLabel, onFileChange, onSubmit }) {
 }
 
 function PrimaryTabs({ activeView, onActivate }) {
-  const portfolioActive = !["retirement", "fundamentals", "real-estate"].includes(activeView);
+  const portfolioActive = !["retirement", "fundamentals", "real-estate", "net-worth"].includes(activeView);
 
   return (
     <div className="tabs primary-tabs" role="tablist" aria-label="Investment sections">
@@ -1581,6 +1586,9 @@ function PrimaryTabs({ activeView, onActivate }) {
       </button>
       <button className={`tab ${activeView === "real-estate" ? "active" : ""}`} type="button" onClick={() => onActivate("real-estate")}>
         Real Estate
+      </button>
+      <button className={`tab ${activeView === "net-worth" ? "active" : ""}`} type="button" onClick={() => onActivate("net-worth")}>
+        Net Worth
       </button>
       <button className={`tab ${activeView === "fundamentals" ? "active" : ""}`} type="button" onClick={() => onActivate("fundamentals")}>
         Fundamentals
@@ -1830,7 +1838,7 @@ function RetirementPage({ data }) {
   return (
     <section className="view active" aria-label="Retirement">
       <div className="tabs" role="tablist" aria-label="Retirement sections">
-        {[["dividend-growth", "Dividend Growth"], ["drawdown", "Drawdown"]].map(([id, label]) => (
+        {[["dividend-growth", "Dividend Growth"], ["drawdown", "Drawdown"], ["die-with-zero", "Die With Zero"]].map(([id, label]) => (
           <button key={id} className={`tab ${activeTab === id ? 'active' : ''}`} type="button" role="tab" id={`${id}-tab`}
             aria-selected={activeTab === id} aria-controls={`${id}-panel`} onClick={() => setActiveTab(id)}>{label}</button>
         ))}
@@ -1840,6 +1848,9 @@ function RetirementPage({ data }) {
       </div>
       <div role="tabpanel" id="drawdown-panel" aria-labelledby="drawdown-tab" hidden={activeTab !== 'drawdown'}>
         <Drawdown data={data} />
+      </div>
+      <div role="tabpanel" id="die-with-zero-panel" aria-labelledby="die-with-zero-tab" hidden={activeTab !== 'die-with-zero'}>
+        <DieWithZero data={data} />
       </div>
     </section>
   );

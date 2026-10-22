@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from backend import real_estate
+from backend import real_estate, net_worth
 
 from server import (
     BASE_DIR,
@@ -103,6 +103,15 @@ class CashBalancePayload(BaseModel):
 
 class RentalCondoPayload(BaseModel):
     mls: str
+
+
+class NetWorthPayload(BaseModel):
+    name: str
+    category: str
+    value: float
+    mortgage: float = 0
+    valuation_date: str
+    notes: str = ''
 
 
 class AccountPayload(BaseModel):
@@ -457,6 +466,38 @@ def summary(username: str = Depends(require_auth)):
 @app.get("/api/accounts")
 def accounts(username: str = Depends(require_auth)):
     return {"accounts": get_accounts()}
+
+
+@app.get('/api/net-worth')
+def net_worth_items(username: str = Depends(require_auth)):
+    return {'items': net_worth.list_items()}
+
+
+@app.post('/api/net-worth')
+def add_net_worth_item(payload: NetWorthPayload, username: str = Depends(require_auth)):
+    try:
+        return {'item': net_worth.save_item(payload.model_dump())}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put('/api/net-worth/{item_id}')
+def edit_net_worth_item(item_id: int, payload: NetWorthPayload, username: str = Depends(require_auth)):
+    try:
+        return {'item': net_worth.save_item(payload.model_dump(), item_id)}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete('/api/net-worth/{item_id}')
+def remove_net_worth_item(item_id: int, username: str = Depends(require_auth)):
+    try:
+        net_worth.delete_item(item_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {'deleted': True}
 
 
 @app.get("/api/transactions")

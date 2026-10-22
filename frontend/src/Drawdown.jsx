@@ -62,7 +62,7 @@ export default function Drawdown({ data }) {
   </section>;
 }
 
-function DrawdownChart({ result }) {
+export function DrawdownChart({ result }) {
   const points = [result.initial, ...result.rows].map(balances);
   const width = 1000, height = 320, left = 90, right = 25, top = 25, bottom = 55;
   const start = Date.parse(points[0].date), end = Date.parse(points.at(-1).date);
