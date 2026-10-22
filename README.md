@@ -65,6 +65,12 @@ docker compose down
 
 The **Net Worth** tab combines all tracked investment account balances (including cash) with saved manual valuations for property, vehicles, art, jewellery and other assets. Each property stores its market value and outstanding mortgage, and displays equity as value minus mortgage. Total assets include the full property value; total debts include its mortgage once. Other debts are entered separately. Manual entries use CAD, include a valuation date and optional notes, and can be added, edited or deleted. They persist in SQLite and do not change retirement projections. Avoid adding assets or debts already included in the totals.
 
+Use **Generate Report** in Net Worth to download a one-page landscape PDF with summary totals, horizontal bars for investment accounts and net asset categories, property equity, and valuation dates. The report uses saved manual entries and current portfolio balances; save or cancel an open edit before generating it. More than 18 investment accounts are condensed into the 17 largest accounts plus an explicitly labelled remainder. The PDF is generated in memory and is not stored on the server.
+
+Net Worth saves an initial baseline and then weekly snapshots on **Fridays at 5 p.m. America/Edmonton**, checked every minute by a dedicated server worker even when price refresh is disabled. The server must be running. A restart after Friday's deadline but within the same Monday-Sunday week saves that week's snapshot with the actual capture time; missing past weeks are not reconstructed. The first save after a weekly deadline serves as the baseline without creating a duplicate. Snapshots preserve investment balances from cached prices, saved asset values, mortgages, notes and valuation dates in SQLite. Editing or deleting current assets/accounts does not alter saved history. No market prices or manual valuations are refreshed by taking a snapshot.
+
+Use **History & change reports** to save an additional snapshot now, select any earlier and later saved dates, compare account/category movements and download a branded one-page change PDF. Account matching uses persistent account IDs, preserving continuity across renames; added or removed accounts compare against zero on the missing side. Category changes use property equity and negative other debts, so their sum reconciles to the change in net worth. Changes include deposits, trades, withdrawals, debt payments and manual valuation edits, rather than measuring investment returns.
+
 ## Build Frontend
 
 ```bash

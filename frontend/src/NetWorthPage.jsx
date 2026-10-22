@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { categories, netWorthTotals } from './netWorth.js';
+import NetWorthHistory from './NetWorthHistory.jsx';
 
 const money = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 });
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Edmonton', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -11,6 +12,7 @@ export default function NetWorthPage({ data, request, parseResponse, onAuthError
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
   const [form, setForm] = useState(null);
   const [message, setMessage] = useState('');
   const [reload, setReload] = useState(0);
@@ -56,10 +58,26 @@ export default function NetWorthPage({ data, request, parseResponse, onAuthError
     } catch (error) { setError(error.message); }
     finally { setBusy(false); }
   }
+  async function generateReport() {
+    setReportBusy(true); setError(''); setMessage('');
+    try {
+      const response = await request('/api/net-worth/report', { cache: 'no-store' });
+      if (response.status === 401) onAuthError();
+      if (!response.ok) { await parseResponse(response); return; }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = `net-worth-${today()}.pdf`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setMessage('Report downloaded. Ready to share with Michelle.');
+    } catch (error) { setError(error.message); }
+    finally { setReportBusy(false); }
+  }
   const totals = netWorthTotals(data.accounts || [], items);
   const change = (key) => (event) => setForm((current) => ({ ...current, [key]: event.target.value }));
   return <section className="view active" aria-label="Net Worth"><section className="section-panel net-worth-panel">
-    <div className="panel-heading"><h2>Net worth</h2><span>All values in CAD</span></div>
+    <div className="panel-heading"><h2>Net worth</h2><div className="net-worth-actions"><span>All values in CAD</span><button type="button" disabled={!loaded || loading || busy || reportBusy || form !== null || !!error} onClick={generateReport}>{reportBusy ? 'Generating…' : 'Generate Report'}</button></div></div>
     <p>Investment accounts update with your portfolio. Add your other assets at their estimated resale value, and keep each property’s mortgage attached to it.</p>
     {error && <p className="message error" role="alert">{error} <button type="button" disabled={busy || loading} onClick={() => setReload((value) => value + 1)}>Refresh list</button></p>}
     {message && <p role="status">{message}</p>}
@@ -94,6 +112,7 @@ export default function NetWorthPage({ data, request, parseResponse, onAuthError
           <td className="numeric">{money.format(item.category === 'debt' ? -item.value : item.value - item.mortgage)}</td><td>{item.valuation_date}</td>
           <td><div className="net-worth-actions"><button type="button" aria-label={`Edit ${item.name}`} disabled={busy || form !== null} onClick={() => { setForm({ ...item }); setMessage(''); }}>Edit</button><button type="button" aria-label={`Delete ${item.name}`} disabled={busy || form !== null} onClick={() => remove(item)}>Delete</button></div></td>
         </tr>)}</tbody></table></div>
+      <NetWorthHistory request={request} parseResponse={parseResponse} onAuthError={onAuthError} editing={form !== null || busy} />
     </>}
   </section></section>;
 }

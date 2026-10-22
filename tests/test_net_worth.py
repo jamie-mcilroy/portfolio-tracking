@@ -48,6 +48,6 @@ class NetWorthTests(unittest.TestCase):
 
     def test_routes_require_authentication(self):
         routes = [route for route in api.app.routes if getattr(route, 'path', '').startswith('/api/net-worth')]
-        self.assertEqual(len(routes), 4)
+        self.assertEqual(len(routes), 9)
         for route in routes:
             self.assertIn(api.require_auth, [dependency.call for dependency in route.dependant.dependencies])

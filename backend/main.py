@@ -16,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from backend import real_estate, net_worth
+from backend import real_estate, net_worth, net_worth_history
+from backend.net_worth_report import build_report
 
 from server import (
     BASE_DIR,
@@ -78,6 +79,8 @@ PRICE_REFRESH_TIMEZONE = ZoneInfo(PRICE_REFRESH_TIMEZONE_NAME)
 
 price_refresh_stop = threading.Event()
 price_refresh_thread: threading.Thread | None = None
+net_worth_stop = threading.Event()
+net_worth_thread: threading.Thread | None = None
 
 app = FastAPI(title="Local Portfolio Tracker", version="0.2.0")
 
@@ -371,11 +374,24 @@ def price_refresh_loop():
         price_refresh_stop.wait(PRICE_REFRESH_SECONDS)
 
 
+def net_worth_snapshot_loop():
+    while not net_worth_stop.is_set():
+        try:
+            net_worth_history.maybe_capture_weekly()
+        except Exception as exc:
+            print(f"net worth snapshot error: {exc}", flush=True)
+        net_worth_stop.wait(60)
+
+
 @app.on_event("startup")
 def start_background_workers():
-    global price_refresh_thread
+    global price_refresh_thread, net_worth_thread
     ensure_auth_user(AUTH_USERNAME, AUTH_PASSWORD, is_admin=True)
     real_estate.clear_saved_listings()
+    if net_worth_thread is None:
+        net_worth_stop.clear()
+        net_worth_thread = threading.Thread(target=net_worth_snapshot_loop, name='net-worth-snapshots', daemon=True)
+        net_worth_thread.start()
     if not PRICE_REFRESH_ENABLED or price_refresh_thread:
         return
     price_refresh_stop.clear()
@@ -385,6 +401,12 @@ def start_background_workers():
 
 @app.on_event("shutdown")
 def stop_background_workers():
+    global net_worth_thread
+    net_worth_stop.set()
+    if net_worth_thread is not None:
+        net_worth_thread.join(timeout=5)
+        if not net_worth_thread.is_alive():
+            net_worth_thread = None
     price_refresh_stop.set()
 
 
@@ -473,12 +495,55 @@ def net_worth_items(username: str = Depends(require_auth)):
     return {'items': net_worth.list_items()}
 
 
+@app.get('/api/net-worth/report')
+def net_worth_report(username: str = Depends(require_auth)):
+    snapshot = get_summary()
+    report = build_report(snapshot.get('accounts', []), net_worth.list_items())
+    report_date = datetime.now(PRICE_REFRESH_TIMEZONE).strftime('%Y-%m-%d')
+    return Response(content=report, media_type='application/pdf', headers={
+        'Content-Disposition': f'attachment; filename="net-worth-{report_date}.pdf"',
+        'Cache-Control': 'no-store',
+    })
+
+
 @app.post('/api/net-worth')
 def add_net_worth_item(payload: NetWorthPayload, username: str = Depends(require_auth)):
     try:
         return {'item': net_worth.save_item(payload.model_dump())}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get('/api/net-worth/snapshots')
+def net_worth_snapshots(username: str = Depends(require_auth)):
+    return {'snapshots': net_worth_history.list_snapshots(),
+            'schedule': 'Fridays at 5 p.m. America/Edmonton'}
+
+
+@app.post('/api/net-worth/snapshots')
+def save_net_worth_snapshot(username: str = Depends(require_auth)):
+    return {'snapshot': net_worth_history.capture_snapshot()}
+
+
+@app.get('/api/net-worth/changes')
+def net_worth_changes(before: int, after: int, username: str = Depends(require_auth)):
+    try:
+        return net_worth_history.compare_snapshots(before, after)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get('/api/net-worth/changes/report')
+def net_worth_change_report(before: int, after: int, username: str = Depends(require_auth)):
+    comparison = net_worth_changes(before, after, username)
+    snapshot = comparison['after']
+    report = build_report(snapshot['accounts'], snapshot['items'], comparison=comparison)
+    return Response(content=report, media_type='application/pdf', headers={
+        'Content-Disposition': 'attachment; filename="net-worth-change.pdf"',
+        'Cache-Control': 'no-store',
+    })
 
 
 @app.put('/api/net-worth/{item_id}')

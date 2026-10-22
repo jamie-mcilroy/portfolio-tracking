@@ -308,6 +308,14 @@ def init_db():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS net_worth_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capture_key TEXT NOT NULL UNIQUE,
+                captured_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS net_worth_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
