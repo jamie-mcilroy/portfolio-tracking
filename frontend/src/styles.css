@@ -2371,3 +2371,7 @@ tr:hover td {
 .rental-fee-inclusions dl { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 12px 0; }
 .rental-fee-inclusions dt { font-size: 11px; color: var(--muted); }
 .rental-fee-inclusions dd { margin: 4px 0 0; font-size: 13px; font-weight: 600; }
+
+.rental-mode { margin-top: 24px; }
+.rental-mode-options { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.rental-mode-options label { display: flex; align-items: center; gap: 8px; cursor: pointer; }

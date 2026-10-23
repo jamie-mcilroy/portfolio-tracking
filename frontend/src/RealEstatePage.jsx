@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { modelRental, monthlyCondoFeePerSquareFoot } from "./rentalCashFlow.js";
+import { modelRental, solveRentalPrice, monthlyCondoFeePerSquareFoot } from "./rentalCashFlow.js";
 
 const cad = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 });
 const preciseCad = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -15,7 +15,8 @@ const inclusionLabel = (listing, key) => listing.condo_fee_inclusions?.[key] ===
 function initial(listing) {
   const values = { price: listing.price ?? '', rent: '', downPaymentPct: 20, interestRate: 5,
     amortizationYears: 25, condoFee: listing.condo_fee_monthly ?? '', annualTax: listing.property_tax_annual ?? '',
-    insurance: 50, utilities: 0, maintenancePct: 5, managementPct: 0, vacancyPct: 5, otherCosts: 0, closingCosts: 0 };
+    insurance: 50, utilities: 0, maintenancePct: 5, managementPct: 0, vacancyPct: 5, otherCosts: 0, closingCosts: 0, pricingMode: 'cashFlow',
+    cashDownPayment: listing.price != null ? Number((listing.price * .2).toFixed(2)) : '', targetCashFlow: 0 };
   const { result } = calculate(values);
   if (result) values.rent = Number(result.breakEvenRent.toFixed(2));
   return values;
@@ -25,6 +26,10 @@ function calculate(values) {
   try {
     const numbers = Object.fromEntries(Object.entries(values).map(([key, value]) =>
       [key, value === '' ? (key === 'rent' ? 0 : NaN) : Number(value)]));
+    if (values.pricingMode === 'purchasePrice') {
+      if (values.rent === '') throw new Error('Enter market rent to calculate a purchase price.');
+      return { result: solveRentalPrice(numbers) };
+    }
     return { result: modelRental(numbers) };
   } catch (error) { return { error: error.message }; }
 }
@@ -114,7 +119,7 @@ export function RentalComparisonList({ comparisons, onOpen, onRemove, onEdit }) 
       ['Main photo', (item) => <ListingPhoto listing={item.listing} />, 'photo'],
       ['Address', (item) => item.listing.address, 'address'],
       ['Asking price', (item) => money(item.listing.price)],
-      ['Modelled purchase price', (item) => dollars(item.values.price)],
+      ['Modelled purchase price', (item) => item.values.pricingMode === 'purchasePrice' ? item.result ? preciseCad.format(item.result.price) : '—' : dollars(item.values.price)],
       ['Condo fee / month', (item) => dollars(item.values.condoFee)],
       ['Floor area', (item) => areaLabel(item.listing)],
       ['Condo fee / sq ft / month', (item) => feePerFootLabel(item.listing, item.values)],
@@ -130,13 +135,19 @@ export function RentalComparisonList({ comparisons, onOpen, onRemove, onEdit }) 
     ]],
     ['Rent & financing', [
       ['Expected rent / month', (item) => item.hasRent ? dollars(item.values.rent) : 'Enter rent'],
-      ['Down payment (%)', (item) => percent(item.values.downPaymentPct)],
+      ['Down payment (%)', (item) => item.values.pricingMode === 'purchasePrice' ? item.result ? percent(item.result.downPaymentPct) : '—' : percent(item.values.downPaymentPct)],
       ['Down payment (CAD)', resultMoney('downPayment')],
       ['Annual mortgage rate', (item) => percent(item.values.interestRate)],
       ['Amortization (years)', (item) => item.values.amortizationYears || '—'],
       ['Mortgage amount', resultMoney('mortgage')],
       ['Mortgage payment / month', resultMoney('mortgagePayment')],
       ['Closing costs', (item) => dollars(item.values.closingCosts)],
+    ]],
+    ['Purchase price goal · open model to change mode', [
+      ['Calculation mode', (item) => item.values.pricingMode === 'purchasePrice' ? 'Find purchase price' : 'Calculate cash flow'],
+      ['Desired surplus / month', (item) => item.values.pricingMode === 'purchasePrice' ? dollars(item.values.targetCashFlow) : '—'],
+      ['Maximum purchase price', (item) => item.result?.price != null ? preciseCad.format(item.result.price) : '—'],
+      ['Asking price minus maximum', (item) => item.result?.price != null && item.listing.price != null ? preciseCad.format(item.listing.price - item.result.price) : '—'],
     ]],
     ['Operating assumptions', [
       ['Vacancy allowance', (item) => percent(item.values.vacancyPct)],
@@ -168,7 +179,8 @@ export function RentalComparisonList({ comparisons, onOpen, onRemove, onEdit }) 
         {rows.map(([label, render, kind]) => <tr key={label}>
           <th scope="row">{label}</th>
           {columns.map((item) => {
-            const editable = editableRows[label];
+            const solvedField = item.values.pricingMode === 'purchasePrice' && ['Modelled purchase price', 'Down payment (%)'].includes(label);
+            const editable = solvedField ? null : editableRows[label];
             const value = item.result?.[kind];
             const tone = value != null && item.hasRent ? value < -.005 ? 'negative' : value > .005 ? 'positive' : '' : '';
             return <td key={item.listing.mls} className={`${editable ? 'rental-sheet-editable' : ''} ${kind === 'photo' ? 'rental-sheet-photo' : ''} ${['address', 'verdict', 'inclusions'].includes(kind) ? 'rental-sheet-text' : ''} ${tone}`}>
@@ -198,6 +210,7 @@ function ListingPhoto({ listing }) {
 
 export function RentalModel({ listing, values, onValuesChange }) {
   const { result, error: calculationError } = calculate(values);
+  const solvingPrice = values.pricingMode === 'purchasePrice';
   const hasRent = values.rent !== '';
   const status = !result || !hasRent ? 'pending' : result.cashFlow > .005 ? 'positive' : result.cashFlow < -.005 ? 'negative' : 'neutral';
   function field(key, label, extra = {}) {
@@ -231,6 +244,29 @@ export function RentalModel({ listing, values, onValuesChange }) {
         </div>
       </div>
     </div>
+    <fieldset className="rental-input-group rental-mode"><legend>Calculation mode</legend>
+      <div className="rental-mode-options">{[['cashFlow', 'Calculate cash flow'], ['purchasePrice', 'Find purchase price']].map(([mode, label]) =>
+        <label key={mode}><input type="radio" name={`pricing-mode-${listing.mls}`} checked={(values.pricingMode || 'cashFlow') === mode}
+          onChange={() => onValuesChange((current) => ({ ...current, pricingMode: mode }))} />{label}</label>)}</div>
+      <p className="row-sub">Find the maximum purchase price supported by market rent, your dollar down payment and your desired monthly surplus. Set the surplus to $0 for break-even. Closing costs are additional cash.</p>
+      {solvingPrice && <>
+        <div className="rental-input-grid">
+          {field('rent', 'Market rent / month (CAD)', { placeholder: 'Enter market rent' })}
+          {field('cashDownPayment', 'Down payment (CAD)')}
+          {field('targetCashFlow', 'Desired cash surplus / month (CAD)')}
+        </div>
+        <p className="row-sub">Replace the starting break-even rent with your estimate of market rent.</p>
+      </>}
+    </fieldset>
+    {solvingPrice && <div className="rental-verdict" aria-live="polite">
+      <span>Maximum purchase price for your cash-flow goal</span>
+      <strong>{result ? preciseCad.format(result.price) : 'No price calculated'}</strong>
+      <p>{calculationError || (listing.price != null ? result.price < listing.price
+        ? `${preciseCad.format(listing.price - result.price)} (${((listing.price - result.price) / listing.price * 100).toFixed(1)}%) below asking price.`
+        : `Asking price is within your maximum by ${preciseCad.format(result.price - listing.price)}.` : 'Asking price is unavailable for comparison.')}</p>
+      {result && <p>{preciseCad.format(result.downPayment)} down ({result.downPaymentPct.toFixed(2)}%) + {preciseCad.format(result.mortgage)} mortgage.</p>}
+      <p className="row-sub">This is a cash-flow ceiling under your assumptions. Taxes and condo fees stay at the entered amounts as price changes.</p>
+    </div>}
     <div className={`rental-verdict rental-verdict-${status}`} aria-live="polite">
       <span>Monthly cash flow, before income tax</span>
       <strong>{result && hasRent ? `${result.cashFlow >= 0 ? '+' : '−'}${preciseCad.format(Math.abs(result.cashFlow))}` : hasRent ? 'Complete the model inputs' : 'Enter your expected rent'}</strong>
@@ -253,9 +289,9 @@ export function RentalModel({ listing, values, onValuesChange }) {
     <div className="rental-model-columns">
       <div>
         <fieldset className="rental-input-group"><legend>Rent & financing</legend><div className="rental-input-grid">
-          {field('price', 'Modelled purchase price (CAD)')}
-          {field('rent', 'Expected monthly rent (CAD)', { placeholder: 'Enter expected rent' })}
-          {field('downPaymentPct', 'Down payment (%)', { max: 100 })}
+          {!solvingPrice && field('price', 'Modelled purchase price (CAD)')}
+          {!solvingPrice && field('rent', 'Expected monthly rent (CAD)', { placeholder: 'Enter expected rent' })}
+          {!solvingPrice && field('downPaymentPct', 'Down payment (%)', { max: 100 })}
           {field('interestRate', 'Annual mortgage rate (%)', { max: 100, step: .1 })}
           {field('amortizationYears', 'Amortization (years)', { min: 1, max: 50, step: 1 })}
           {field('closingCosts', 'Closing costs (CAD)')}
@@ -280,7 +316,7 @@ export function RentalModel({ listing, values, onValuesChange }) {
       </div>
     </div>
     <p className="row-sub rental-assumptions">Starting values are illustrative: 20% down, 5% annual mortgage rate, 25-year amortization, 5% vacancy, 5% maintenance and $50/month insurance. Use your own estimates. Set 100% down for an all-cash purchase. Condo fees and taxes come from the listing when available.</p>
-    <details className="rental-method"><summary>Calculation assumptions</summary><p>Monthly fixed-rate mortgage payments use Canadian semi-annual compounding. The full mortgage payment, including principal, is a cash outflow. Vacancy reduces collected rent; maintenance and management percentages apply to collected rent. Break-even rent covers these allowances and all entered monthly costs. Closing costs affect initial cash, not recurring cash flow. Annual cash return divides annual cash flow by the down payment, or by down payment plus closing costs. A zero denominator shows n/a. Returns exclude appreciation and equity gained through principal repayment. Cash flow is before income tax and excludes mortgage default insurance, purchase eligibility and unentered special assessments. This is a cash-flow model, not a tax-profit calculation.</p>
+    <details className="rental-method"><summary>Calculation assumptions</summary><p>Find purchase price subtracts the desired monthly surplus from rent after vacancy and operating costs, converts the remaining mortgage payment budget into mortgage principal, then adds your fixed dollar down payment. The maximum price is rounded down to cents. This goal measures cash flow; break-even provides no cash return. </p><p>Monthly fixed-rate mortgage payments use Canadian semi-annual compounding. The full mortgage payment, including principal, is a cash outflow. Vacancy reduces collected rent; maintenance and management percentages apply to collected rent. Break-even rent covers these allowances and all entered monthly costs. Closing costs affect initial cash, not recurring cash flow. Annual cash return divides annual cash flow by the down payment, or by down payment plus closing costs. A zero denominator shows n/a. Returns exclude appreciation and equity gained through principal repayment. Cash flow is before income tax and excludes mortgage default insurance, purchase eligibility and unentered special assessments. This is a cash-flow model, not a tax-profit calculation.</p>
       <a href="https://www.bmo.com/en-ca/popups/main/personal/mortgages/terms-and-conditions-en/" target="_blank" rel="noreferrer">Fixed-rate mortgage interest convention</a>
     </details>
   </div>;

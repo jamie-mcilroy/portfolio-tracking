@@ -44,3 +44,22 @@ export function modelRental(input) {
     breakEvenRent, initialCash, downPaymentReturnPct, cashOnCashReturnPct,
     netOperatingIncome: collectedRent - operatingCosts };
 }
+
+// Solve the maximum price with a fixed dollar down payment and monthly cash-flow goal.
+export function solveRentalPrice(input) {
+  const { cashDownPayment, targetCashFlow } = input;
+  if (![cashDownPayment, targetCashFlow].every((value) => Number.isFinite(value) && value >= 0))
+    throw new Error('Enter a down payment and desired monthly cash surplus of zero or more.');
+  // Reuse the forward model's validation, operating costs, and mortgage convention.
+  const cashModel = modelRental({ ...input, price: 1, downPaymentPct: 100 });
+  const paymentBudget = cashModel.netOperatingIncome - targetCashFlow;
+  if (paymentBudget < 0)
+    throw new Error('No purchase price meets this goal: rent after operating costs is below your desired surplus, even without a mortgage.');
+  const paymentPerDollar = modelRental({ ...input, price: 1, downPaymentPct: 0 }).mortgagePayment;
+  // Round down so the displayed price does not exceed the affordable price.
+  const price = Math.floor((cashDownPayment + paymentBudget / paymentPerDollar) * 100) / 100;
+  if (!Number.isFinite(price) || price <= 0 || price < cashDownPayment)
+    throw new Error('These inputs do not support a positive purchase price with the full down payment.');
+  const downPaymentPct = cashDownPayment / price * 100;
+  return { ...modelRental({ ...input, price, downPaymentPct }), price, downPaymentPct };
+}

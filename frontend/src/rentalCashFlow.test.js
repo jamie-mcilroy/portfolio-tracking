@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { modelRental, monthlyCondoFeePerSquareFoot } from './rentalCashFlow.js';
+import { modelRental, solveRentalPrice, monthlyCondoFeePerSquareFoot } from './rentalCashFlow.js';
 const input = { price: 270000, rent: 1800, downPaymentPct: 20, interestRate: 5, amortizationYears: 25,
   condoFee: 480, annualTax: 2061, insurance: 50, utilities: 0, maintenancePct: 5,
   managementPct: 0, vacancyPct: 5, otherCosts: 0, closingCosts: 0 };
@@ -76,4 +76,48 @@ test('monthly condo fee per square foot updates with the fee and handles unknown
   near(monthlyCondoFeePerSquareFoot(0, 600), 0);
   for (const [fee, area] of [[null, 600], ['', 600], [480, null], [480, 0], [480, -1], [NaN, 600]])
     assert.equal(monthlyCondoFeePerSquareFoot(fee, area), null);
+});
+
+
+const solve = (overrides = {}) => solveRentalPrice({ ...input, cashDownPayment: 54000, targetCashFlow: 0, ...overrides });
+
+test('reverse pricing reproduces the forward model with a fixed dollar down payment', () => {
+  for (const targetCashFlow of [0, 200, 500]) {
+    const result = solve({ targetCashFlow, closingCosts: 4000 });
+    near(result.downPayment, 54000);
+    near(result.initialCash, 58000);
+    assert.ok(result.cashFlow >= targetCashFlow - 1e-8);
+    near(result.cashFlow, targetCashFlow, .0001);
+    const higherPrice = result.price + .01;
+    assert.ok(run({ price: higherPrice, downPaymentPct: 54000 / higherPrice * 100, closingCosts: 4000 }).cashFlow < targetCashFlow);
+  }
+});
+
+test('price ceiling responds to rent, fixed down payment, expenses, rates and surplus goal', () => {
+  const base = solve();
+  assert.ok(solve({ rent: 2000 }).price > base.price);
+  near(solve({ cashDownPayment: 64000 }).price - base.price, 10000, .011);
+  assert.ok(solve({ condoFee: 600 }).price < base.price);
+  assert.ok(solve({ interestRate: 6 }).price < base.price);
+  assert.ok(solve({ targetCashFlow: 200 }).price < base.price);
+  near(solve({ closingCosts: 10000 }).price, base.price);
+});
+
+test('reverse pricing supports zero-interest mortgages, zero down, and an all-cash boundary', () => {
+  const zeroRate = solve({ interestRate: 0 });
+  near(zeroRate.price, 54000 + run({ downPaymentPct: 100 }).netOperatingIncome * 300, .011);
+  near(solve({ cashDownPayment: 0 }).downPayment, 0);
+  const cash = solve({ targetCashFlow: run({ downPaymentPct: 100 }).netOperatingIncome });
+  near(cash.price, 54000);
+  near(cash.mortgagePayment, 0);
+});
+
+test('reverse pricing rejects unattainable goals and missing or invalid required inputs', () => {
+  for (const overrides of [{ rent: 100 }, { targetCashFlow: 1000 }, { cashDownPayment: -1 },
+    { targetCashFlow: NaN }, { cashDownPayment: NaN }, { condoFee: NaN }, { annualTax: NaN },
+    { amortizationYears: 0 }, { vacancyPct: 100 }, { interestRate: Infinity },
+    { cashDownPayment: 0, targetCashFlow: run({ downPaymentPct: 100 }).netOperatingIncome }])
+    assert.throws(() => solve(overrides));
+  // An asking price and percentage down payment are not required in reverse mode.
+  assert.ok(solve({ price: NaN, downPaymentPct: NaN }).price > 0);
 });
