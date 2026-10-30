@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>West Bragg Forestry evergreen mark</title>
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="#10271D" stroke="#294B39"/>
+  <path d="M32 11 21 26h6L17 39h10L15 51h34L37 39h10L37 26h6L32 11Z" fill="#B3D4BD"/>
+  <path d="M32 47v8" stroke="#B3D4BD" stroke-width="4" stroke-linecap="round"/>
+</svg>

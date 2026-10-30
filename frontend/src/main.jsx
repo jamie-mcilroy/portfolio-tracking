@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import wbfcLogoUrl from "./assets/wbfc-logo.png";
+import wbfcLogoUrl from "./assets/wbfc-mark.svg";
 import { buildPortfolioPerformanceSeries } from "./performance.js";
 import RetirementHoldingsTable from "./RetirementHoldingsTable.jsx";
 import Drawdown from "./Drawdown.jsx";
@@ -1236,6 +1236,9 @@ function App() {
     .filter(Boolean)
     .sort()
     .at(-1);
+  const latestReportLabel = latestReport
+    ?.replace(/January|February|March|April|June|July|August|September|October|November|December/g, (month) => month.slice(0, 3))
+    .replace(/(\d{4})\s+(\d{1,2}:\d{2})/, "$1 · $2");
 
   if (auth.status === "checking") {
     return (
@@ -1260,9 +1263,17 @@ function App() {
   return (
     <>
       <header className="topbar">
-        <div>
-          <h1>Investments</h1>
-          <p>{latestReport ? `Latest holdings: ${latestReport}` : "Local holdings snapshots"}</p>
+        <div className="topbar-brand">
+          <img
+            className="topbar-logo"
+            src={wbfcLogoUrl}
+            alt="West Bragg Forestry"
+            decoding="async"
+          />
+          <div>
+            <h1>WBFC Portfolio</h1>
+            <p>{latestReportLabel ? `Holdings updated ${latestReportLabel}` : "Local holdings snapshots"}</p>
+          </div>
         </div>
         <SessionMenu
           username={auth.username}
@@ -1441,7 +1452,7 @@ function LoginScreen({ message, onLogin }) {
       <form className="login-panel" onSubmit={onLogin}>
         <div className="login-brand">
           <img className="login-logo" src={wbfcLogoUrl} alt="West Bragg Forestry Corp logo" decoding="async" />
-          <h1>Investments</h1>
+          <h1>WBFC Portfolio</h1>
           <p>Sign in to continue</p>
         </div>
         {message && <div className={`message ${message.isError ? "error" : ""}`}>{message.text}</div>}
@@ -1482,9 +1493,9 @@ function SessionMenu({
   return (
     <div className="top-actions">
       <div className="session-menu">
-        <button className="session-menu-button" type="button" onClick={() => setMenuOpen((open) => !open)}>
+        <button className="session-menu-button" type="button" aria-expanded={menuOpen} aria-label={`Account menu for ${username}`} onClick={() => setMenuOpen((open) => !open)}>
           <span>{username}</span>
-          <span aria-hidden="true">v</span>
+          <svg className="session-menu-chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
         </button>
         {menuOpen ? (
           <div className="session-menu-panel">
